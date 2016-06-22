@@ -10,6 +10,7 @@ import numpy as np
 
 import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
+from tensorflow.contrib import skflow
 
 import matplotlib.pyplot as plt
 import math
@@ -50,6 +51,7 @@ def fc(name, inputs, input_dim, output_dim, activation="tanh"):
 def build_discriminator(X, num_features, num_hidden):
     out = fc("fc1", X, input_dim=num_features, output_dim=num_hidden[0],
              activation="tanh")
+    out = tf.nn.dropout(out, 0.2)
 
     for i in range(len(num_hidden), 1):
         out = fc("fc%d" % (i + 1), out,
@@ -60,14 +62,23 @@ def build_discriminator(X, num_features, num_hidden):
               activation="sigmoid")
 
 
+def batch_norm(x, name=""):
+    mean, var = tf.nn.moments(x, axes=[0])
+    return tf.nn.batch_normalization(x, mean, var,
+                                     offset=None, scale=None,
+                                     variance_epsilon=0.0001, name=name)
+
+
 def build_generator(z, num_features, latent_dim, num_hidden):
     out = fc("fc1", z, input_dim=latent_dim, output_dim=num_hidden[0],
-             activation="tanh")
+             activation="linear")
+    out = tf.nn.tanh(batch_norm(out))
 
     for i in range(len(num_hidden), 1):
         out = fc("fc%d" % (i + 1), out,
                  input_dim=num_hidden[i-1], output_dim=num_hidden[i],
-                 activation="tanh")
+                 activation="linear")
+        out = tf.nn.tanh(batch_norm(out))
 
     return fc("linear", out, input_dim=num_hidden[-1], output_dim=num_features,
               activation="linear")
@@ -82,6 +93,7 @@ def build_model(num_features, latent_dim, num_hidden):
 
     with tf.variable_scope("Generator"):
         model["G_z"] = G_z = build_generator(z, num_features, latent_dim, num_hidden["generator"])
+        model["summary"]["generator"] += [tf.histogram_summary("G/G_z", G_z)]
 
     with tf.variable_scope("Discriminator"):
         D_X = build_discriminator(X, num_features, num_hidden["discriminator"])
@@ -98,7 +110,7 @@ def build_model(num_features, latent_dim, num_hidden):
     model["summary"]["generator"] += [
         tf.scalar_summary("G/log(1-D(G(z)))", tf.reduce_mean(model["log(1-D(G(z)))"]))]
 
-    optimizer = tf.train.MomentumOptimizer(learning_rate=0.0001, momentum=0.9)
+    optimizer = tf.train.MomentumOptimizer(learning_rate=0.01, momentum=0.5)
     t_vars = tf.trainable_variables()
     D_vars = [v for v in t_vars if v.name.startswith("Discriminator")]
     G_vars = [v for v in t_vars if v.name.startswith("Generator")]
@@ -108,7 +120,7 @@ def build_model(num_features, latent_dim, num_hidden):
     model["D_optimizer"] = optimizer.apply_gradients(model["D_grads"])
     model["summary"]["discriminator"] += [tf.scalar_summary("D/loss", model["D_loss"])]
 
-    optimizer = tf.train.MomentumOptimizer(learning_rate=0.0003, momentum=0.9)
+    optimizer = tf.train.MomentumOptimizer(learning_rate=0.0003, momentum=0.5)
     model["G_loss"] = tf.reduce_mean(model["log(1-D(G(z)))"] - model["log(D(G(z)))"])
     model["G_grads"] = optimizer.compute_gradients(model["G_loss"], var_list=G_vars)
     model["G_optimizer"] = optimizer.apply_gradients(model["G_grads"])
@@ -167,7 +179,7 @@ def train(sess, model, X, config):
                     [G_merged, model["log(1-D(G(z)))"], model["G_loss"], model["G_optimizer"]],
                     feed_dict={model["z"]: z})
                 assert not np.isnan(loss)
-                epoch_cost_G += loss / (len(batches) // 10)
+                epoch_cost_G += loss / (len(batches) // 5)
 
                 writer.add_summary(summary_str, i)
 
@@ -192,7 +204,7 @@ if __name__ == "__main__":
         shutil.rmtree(config["logdir"])
 
     num_hidden = {
-        "generator": [256, 256],
+        "generator": [1024, 1024],
         "discriminator": [256, 256]
     }
 
