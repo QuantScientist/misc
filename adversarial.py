@@ -78,8 +78,9 @@ def batch_norm(x, name=""):
 def minibatch_discriminator(x, num_features, output_dim):
     # TODO: get this done
     T = get_weight("T", shape=(num_features, output_dim, output_dim))
-    M = tf.matmul(x, tf.reshape(T, (num_features, output_dim, output_dim)))
+    M = tf.matmul(x, tf.reshape(T, (num_features, output_dim * output_dim)))
     M = tf.reshape(M, (-1, output_dim, output_dim))
+
 
 
 def build_generator(z, num_features, latent_dim, num_hidden):
@@ -129,9 +130,9 @@ def build_model(num_features, latent_dim, num_hidden):
         tf.scalar_summary("G/log(1-D(G(z)))", tf.reduce_mean(model["log(1-D(G(z)))"]))]
 
     # Feature matching
-    model["feature_matching"] = tf.reduce_mean(tf.squared_difference(
-        discriminator1["fc1"], discriminator2["fc1"]
-    ))
+    model["feature_matching"] = tf.square(
+        tf.reduce_mean(discriminator1["fc1"], 1) - tf.reduce_mean(discriminator2["fc1"], 1)
+    )
 
     optimizer = tf.train.MomentumOptimizer(learning_rate=0.01, momentum=0.9)
     t_vars = tf.trainable_variables()
@@ -145,7 +146,7 @@ def build_model(num_features, latent_dim, num_hidden):
 
     optimizer = tf.train.MomentumOptimizer(learning_rate=0.001, momentum=0.9)
     # model["G_loss"] = tf.reduce_mean(model["log(1-D(G(z)))"] - model["log(D(G(z)))"])
-    model["G_loss"] = -model["feature_matching"]
+    model["G_loss"] = tf.reduce_mean(model["feature_matching"])
     model["G_grads"] = optimizer.compute_gradients(model["G_loss"], var_list=G_vars)
     model["G_optimizer"] = optimizer.apply_gradients(model["G_grads"])
     model["summary"]["generator"] += [tf.scalar_summary("G/loss", model["G_loss"])]
@@ -223,13 +224,13 @@ def train(sess, model, X, config):
     fig = plt.figure()
 
     def init():
-        sns.kdeplot(X.reshape(-1), legend="X")
+        sns.kdeplot(X.reshape(-1), label="p(x)")
 
     def update(i):
         sns.kdeplot(generated_samples[i].reshape(-1))
 
     ani = animation.FuncAnimation(fig, update, frames=len(generated_samples), repeat=False)
-    ani.save("animation.gif", writer="imagemagick", fps=30)
+    ani.save("animation.gif", writer="imagemagick", fps=5)
 
 
 if __name__ == "__main__":
@@ -244,7 +245,7 @@ if __name__ == "__main__":
     X = np.random.normal(size=10**5).reshape((-1, 1))
 
     config = dict()
-    config["num_epochs"] = 20
+    config["num_epochs"] = 10
     config["batch_size"] = 128
     config["logdir"] = "logs/"
 
@@ -261,3 +262,10 @@ if __name__ == "__main__":
                         latent_dim=1,
                         num_hidden=num_hidden)
     train(sess, model, X, config)
+
+    # DEBUG
+    # z = sample_noise((1, 2))
+    # G_z = sess.run(model["G_z"], feed_dict={model["z"]: z})
+    # image = G_z.reshape((28, 28))
+    # plt.imshow(image)
+    # plt.show()
