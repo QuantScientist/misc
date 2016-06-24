@@ -10,9 +10,10 @@ import numpy as np
 
 import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
-from tensorflow.contrib import skflow
 
 import matplotlib.pyplot as plt
+from matplotlib import animation
+import seaborn as sns
 import math
 
 
@@ -49,17 +50,22 @@ def fc(name, inputs, input_dim, output_dim, activation="tanh"):
 
 
 def build_discriminator(X, num_features, num_hidden):
+    D = {}
     out = fc("fc1", X, input_dim=num_features, output_dim=num_hidden[0],
-             activation="tanh")
-    out = tf.nn.dropout(out, 0.2)
+                 activation="linear")
+    out = tf.nn.tanh(batch_norm(out))
+    D["fc1"] = out = tf.nn.dropout(out, 0.2)
 
     for i in range(len(num_hidden), 1):
         out = fc("fc%d" % (i + 1), out,
-                 input_dim=num_hidden[i-1], output_dim=num_hidden[i],
-                 activation="tanh")
+                  input_dim=num_hidden[i-1], output_dim=num_hidden[i],
+                  activation="linear")
+        out = tf.nn.tanh(batch_norm(out))
+        D["fc%d" % (i + 1)] = out
 
-    return fc("sigmoid", out, input_dim=num_hidden[-1], output_dim=1,
-              activation="sigmoid")
+    D["sigmoid"] = fc("sigmoid", out, input_dim=num_hidden[-1], output_dim=1,
+                      activation="sigmoid")
+    return D
 
 
 def batch_norm(x, name=""):
@@ -69,19 +75,28 @@ def batch_norm(x, name=""):
                                      variance_epsilon=0.0001, name=name)
 
 
+def minibatch_discriminator(x, num_features, output_dim):
+    # TODO: get this done
+    T = get_weight("T", shape=(num_features, output_dim, output_dim))
+    M = tf.matmul(x, tf.reshape(T, (num_features, output_dim, output_dim)))
+    M = tf.reshape(M, (-1, output_dim, output_dim))
+
+
 def build_generator(z, num_features, latent_dim, num_hidden):
+    G = {}
     out = fc("fc1", z, input_dim=latent_dim, output_dim=num_hidden[0],
              activation="linear")
-    out = tf.nn.tanh(batch_norm(out))
+    G["fc1"] = out = tf.nn.tanh(batch_norm(out))
 
     for i in range(len(num_hidden), 1):
         out = fc("fc%d" % (i + 1), out,
                  input_dim=num_hidden[i-1], output_dim=num_hidden[i],
                  activation="linear")
-        out = tf.nn.tanh(batch_norm(out))
+        G["fc%d" % (i + 1)] = out = tf.nn.tanh(batch_norm(out))
 
-    return fc("linear", out, input_dim=num_hidden[-1], output_dim=num_features,
-              activation="linear")
+    G["linear"] = fc("linear", out, input_dim=num_hidden[-1], output_dim=num_features,
+                         activation="linear")
+    return G
 
 
 def build_model(num_features, latent_dim, num_hidden):
@@ -92,14 +107,17 @@ def build_model(num_features, latent_dim, num_hidden):
     model["latent_dim"] = latent_dim
 
     with tf.variable_scope("Generator"):
-        model["G_z"] = G_z = build_generator(z, num_features, latent_dim, num_hidden["generator"])
+        generator = build_generator(z, num_features, latent_dim, num_hidden["generator"])
+        model["G_z"] = G_z = generator["linear"]
         model["summary"]["generator"] += [tf.histogram_summary("G/G_z", G_z)]
 
     with tf.variable_scope("Discriminator"):
-        D_X = build_discriminator(X, num_features, num_hidden["discriminator"])
+        discriminator1 = build_discriminator(X, num_features, num_hidden["discriminator"])
+        model["D(x)"] = D_X = discriminator1["sigmoid"]
 
     with tf.variable_scope("Discriminator", reuse=True):
-        D_G_z = build_discriminator(G_z, num_features, num_hidden["discriminator"])
+        discriminator2 = build_discriminator(G_z, num_features, num_hidden["discriminator"])
+        model["D(G(z))"] = D_G_z = discriminator2["sigmoid"]
 
     model["log(D(x))"] = tf.log(D_X)
     model["log(1-D(G(z)))"] = tf.log(1-D_G_z)
@@ -110,7 +128,12 @@ def build_model(num_features, latent_dim, num_hidden):
     model["summary"]["generator"] += [
         tf.scalar_summary("G/log(1-D(G(z)))", tf.reduce_mean(model["log(1-D(G(z)))"]))]
 
-    optimizer = tf.train.MomentumOptimizer(learning_rate=0.01, momentum=0.5)
+    # Feature matching
+    model["feature_matching"] = tf.reduce_mean(tf.squared_difference(
+        discriminator1["fc1"], discriminator2["fc1"]
+    ))
+
+    optimizer = tf.train.MomentumOptimizer(learning_rate=0.01, momentum=0.9)
     t_vars = tf.trainable_variables()
     D_vars = [v for v in t_vars if v.name.startswith("Discriminator")]
     G_vars = [v for v in t_vars if v.name.startswith("Generator")]
@@ -120,8 +143,9 @@ def build_model(num_features, latent_dim, num_hidden):
     model["D_optimizer"] = optimizer.apply_gradients(model["D_grads"])
     model["summary"]["discriminator"] += [tf.scalar_summary("D/loss", model["D_loss"])]
 
-    optimizer = tf.train.MomentumOptimizer(learning_rate=0.0003, momentum=0.5)
-    model["G_loss"] = tf.reduce_mean(model["log(1-D(G(z)))"] - model["log(D(G(z)))"])
+    optimizer = tf.train.MomentumOptimizer(learning_rate=0.001, momentum=0.9)
+    # model["G_loss"] = tf.reduce_mean(model["log(1-D(G(z)))"] - model["log(D(G(z)))"])
+    model["G_loss"] = -model["feature_matching"]
     model["G_grads"] = optimizer.compute_gradients(model["G_loss"], var_list=G_vars)
     model["G_optimizer"] = optimizer.apply_gradients(model["G_grads"])
     model["summary"]["generator"] += [tf.scalar_summary("G/loss", model["G_loss"])]
@@ -156,6 +180,8 @@ def train(sess, model, X, config):
 
     sess.run(tf.initialize_all_variables())
 
+    generated_samples = []
+
     for epoch in range(config["num_epochs"]):
         epoch_cost_D = 0.
         epoch_cost_G = 0.
@@ -172,22 +198,44 @@ def train(sess, model, X, config):
 
             writer.add_summary(summary_str, i)
 
-            if (i + 1) % 5 == 0:
+            if (i + 1) % 1 == 0:
                 # Train generator. (Discriminator is fixed.)
                 z = sample_noise(shape=(len(batch), model["latent_dim"]))
-                summary_str, log_D_G_z, loss, _ = sess.run(
-                    [G_merged, model["log(1-D(G(z)))"], model["G_loss"], model["G_optimizer"]],
-                    feed_dict={model["z"]: z})
+                summary_str, G_z, loss, _ = sess.run(
+                    [G_merged, model["G_z"], model["G_loss"], model["G_optimizer"]],
+                    feed_dict={model["X"]: X[batch, :], model["z"]: z})
                 assert not np.isnan(loss)
-                epoch_cost_G += loss / (len(batches) // 5)
+                epoch_cost_G += loss / (len(batches) // 1)
 
                 writer.add_summary(summary_str, i)
+
+                # DEBUG
+                generated_samples += [G_z]
 
         print("[Epoch %d] Discriminator cost = %.5f" % (epoch, epoch_cost_D))
         print("           Generator cost = %.5f" % epoch_cost_G)
 
 
+    # DEBUG
+    print("Plotting...")
+    generated_samples = generated_samples[:10] + generated_samples[-10:]
+
+    fig = plt.figure()
+
+    def init():
+        sns.kdeplot(X.reshape(-1), legend="X")
+
+    def update(i):
+        sns.kdeplot(generated_samples[i].reshape(-1))
+
+    ani = animation.FuncAnimation(fig, update, frames=len(generated_samples), repeat=False)
+    ani.save("animation.gif", writer="imagemagick", fps=30)
+
+
 if __name__ == "__main__":
+    # TODO:
+    # - minibatch discrimination
+
     # mnist = input_data.read_data_sets("data/", one_hot=True)
     # X = np.vstack([mnist.train.images,
     #                mnist.validation.images,
@@ -196,7 +244,7 @@ if __name__ == "__main__":
     X = np.random.normal(size=10**5).reshape((-1, 1))
 
     config = dict()
-    config["num_epochs"] = 50
+    config["num_epochs"] = 20
     config["batch_size"] = 128
     config["logdir"] = "logs/"
 
@@ -204,7 +252,7 @@ if __name__ == "__main__":
         shutil.rmtree(config["logdir"])
 
     num_hidden = {
-        "generator": [1024, 1024],
+        "generator": [256, 256],
         "discriminator": [256, 256]
     }
 
@@ -213,12 +261,3 @@ if __name__ == "__main__":
                         latent_dim=1,
                         num_hidden=num_hidden)
     train(sess, model, X, config)
-
-    # DEBUG
-    z = sample_noise((10**5, 1))
-    G_z = sess.run(model["G_z"], feed_dict={model["z"]: z})
-    import seaborn as sns
-    sns.kdeplot(G_z.reshape(-1), label="G(z)")
-    sns.kdeplot(X.reshape(-1), label="x")
-    plt.legend()
-    plt.show()
