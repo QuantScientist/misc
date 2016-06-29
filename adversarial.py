@@ -4,11 +4,14 @@ from __future__ import print_function
 
 import os
 import shutil
+# noinspection PyUnresolvedReferences
 from six.moves import range
 
 import numpy as np
+np.random.seed(0)
 
 import tensorflow as tf
+tf.set_random_seed(0)
 from tensorflow.examples.tutorials.mnist import input_data
 
 import matplotlib.pyplot as plt
@@ -52,16 +55,17 @@ def fc(name, inputs, input_dim, output_dim, activation="tanh"):
 def build_discriminator(X, num_features, num_hidden):
     D = {}
     out = fc("fc1", X, input_dim=num_features, output_dim=num_hidden[0],
-                 activation="linear")
-    out = tf.nn.tanh(batch_norm(out))
-    D["fc1"] = out = tf.nn.dropout(out, 0.2)
+             activation="linear")
+    D["fc1"] = out = tf.nn.tanh(batch_norm(out))
+    D["md1"] = out = minibatch_discriminator("md1", out, num_hidden[0], num_hidden[0])
+    D["dropout1"] = out = tf.nn.dropout(out, 0.2)
 
     for i in range(len(num_hidden), 1):
         out = fc("fc%d" % (i + 1), out,
                   input_dim=num_hidden[i-1], output_dim=num_hidden[i],
                   activation="linear")
-        out = tf.nn.tanh(batch_norm(out))
-        D["fc%d" % (i + 1)] = out
+        D["fc%d" % (i + 1)] = out = tf.nn.tanh(batch_norm(out))
+        D["md%d" % (i + 1)] = out = minibatch_discriminator(out, num_hidden[i], num_hidden[i])
 
     D["sigmoid"] = fc("sigmoid", out, input_dim=num_hidden[-1], output_dim=1,
                       activation="sigmoid")
@@ -75,37 +79,51 @@ def batch_norm(x, name=""):
                                      variance_epsilon=0.0001, name=name)
 
 
-def minibatch_discriminator(x, num_features, output_dim):
-    # TODO: get this done
-    T = get_weight("T", shape=(num_features, output_dim, output_dim))
-    M = tf.matmul(x, tf.reshape(T, (num_features, output_dim * output_dim)))
-    M = tf.reshape(M, (-1, output_dim, output_dim))
-
+def minibatch_discriminator(name, x, num_features, output_dim, C=5):
+    # TODO: better name for C
+    with tf.variable_scope(name):
+        T = get_weight("T", shape=(num_features, output_dim, C))
+        M = tf.matmul(x, tf.reshape(T, (num_features, output_dim * C)))
+        M = tf.reshape(M, (-1, output_dim, C))
+        diff = tf.abs(tf.expand_dims(M, 0) - tf.expand_dims(M, 1))
+        l1norm = tf.reduce_sum(diff, -1)
+        return tf.reduce_sum(tf.exp(-l1norm), 1) * 1e-3
 
 
 def build_generator(z, num_features, latent_dim, num_hidden):
     G = {}
     out = fc("fc1", z, input_dim=latent_dim, output_dim=num_hidden[0],
              activation="linear")
-    G["fc1"] = out = tf.nn.tanh(batch_norm(out))
+    # G["fc1"] = out = tf.nn.tanh(batch_norm(out))
+    G["fc1"] = out = tf.nn.tanh(out)
 
     for i in range(len(num_hidden), 1):
         out = fc("fc%d" % (i + 1), out,
                  input_dim=num_hidden[i-1], output_dim=num_hidden[i],
                  activation="linear")
-        G["fc%d" % (i + 1)] = out = tf.nn.tanh(batch_norm(out))
+        # G["fc%d" % (i + 1)] = out = tf.nn.tanh(batch_norm(out))
+        G["fc%d" % (i + 1)] = out = tf.nn.tanh(out)
 
-    G["linear"] = fc("linear", out, input_dim=num_hidden[-1], output_dim=num_features,
-                         activation="linear")
+    G["linear"] = fc("linear", out,
+                     input_dim=num_hidden[-1], output_dim=num_features,
+                     activation="linear")
     return G
 
 
+def historical_averaging(vars, moving_averages):
+    s = 0.
+    for var, ma in zip(vars, moving_averages):
+        s += tf.reduce_sum(tf.square(var - ma))
+    return s
+
+
 def build_model(num_features, latent_dim, num_hidden):
-    model = {"loss": None, "optimizer": None, "X": None, "y": None,
+    model = {"loss": None, "optimizer": None, "X": None, "y": None, "ema": None,
              "summary": {"generator": [], "discriminator": []}}
     model["X"] = X = tf.placeholder(tf.float32, shape=(None, num_features))
     model["z"] = z = tf.placeholder(tf.float32, shape=(None, latent_dim))
     model["latent_dim"] = latent_dim
+    model["ema"] = tf.train.ExponentialMovingAverage(decay=0.9999)
 
     with tf.variable_scope("Generator"):
         generator = build_generator(z, num_features, latent_dim, num_hidden["generator"])
@@ -131,22 +149,31 @@ def build_model(num_features, latent_dim, num_hidden):
 
     # Feature matching
     model["feature_matching"] = tf.square(
-        tf.reduce_mean(discriminator1["fc1"], 1) - tf.reduce_mean(discriminator2["fc1"], 1)
+        tf.reduce_mean(discriminator1["fc1"], 0) - tf.reduce_mean(discriminator2["fc1"], 0)
     )
 
-    optimizer = tf.train.MomentumOptimizer(learning_rate=0.01, momentum=0.9)
+    optimizer = tf.train.MomentumOptimizer(learning_rate=0.001, momentum=0.9)
     t_vars = tf.trainable_variables()
     D_vars = [v for v in t_vars if v.name.startswith("Discriminator")]
     G_vars = [v for v in t_vars if v.name.startswith("Generator")]
 
+    model["D_maintain_ave_op"] = model["ema"].apply(D_vars)
+    model["G_maintain_ave_op"] = model["ema"].apply(G_vars)
+    D_moving_averages = [model["ema"].average(v) for v in D_vars]
+    G_moving_averages = [model["ema"].average(v) for v in G_vars]
+    model["D_historical_average"] = historical_averaging(D_vars, D_moving_averages)
+    model["G_historical_average"] = historical_averaging(G_vars, G_moving_averages)
+
     model["D_loss"] = -tf.reduce_mean(model["log(D(x))"] + model["log(1-D(G(z)))"])
+    model["D_loss"] += model["D_historical_average"]
     model["D_grads"] = optimizer.compute_gradients(model["D_loss"], var_list=D_vars)
     model["D_optimizer"] = optimizer.apply_gradients(model["D_grads"])
     model["summary"]["discriminator"] += [tf.scalar_summary("D/loss", model["D_loss"])]
 
-    optimizer = tf.train.MomentumOptimizer(learning_rate=0.001, momentum=0.9)
+    optimizer = tf.train.MomentumOptimizer(learning_rate=0.0003, momentum=0.9)
     # model["G_loss"] = tf.reduce_mean(model["log(1-D(G(z)))"] - model["log(D(G(z)))"])
     model["G_loss"] = tf.reduce_mean(model["feature_matching"])
+    model["G_loss"] += model["G_historical_average"]
     model["G_grads"] = optimizer.compute_gradients(model["G_loss"], var_list=G_vars)
     model["G_optimizer"] = optimizer.apply_gradients(model["G_grads"])
     model["summary"]["generator"] += [tf.scalar_summary("G/loss", model["G_loss"])]
@@ -183,6 +210,10 @@ def train(sess, model, X, config):
 
     generated_samples = []
 
+    z = sample_noise(shape=(config["batch_size"], model["latent_dim"]))
+    G_z = sess.run(model["G_z"], feed_dict={model["z"]: z})
+    generated_samples += [G_z]
+
     for epoch in range(config["num_epochs"]):
         epoch_cost_D = 0.
         epoch_cost_G = 0.
@@ -191,9 +222,9 @@ def train(sess, model, X, config):
         for i, batch in enumerate(batches):
             # Train discriminator. (Generator is fixed.)
             z = sample_noise(shape=(len(batch), model["latent_dim"]))
-            summary_str, log_D_x, log_D_G_z, loss, _ = sess.run(
-                [D_merged, model["log(D(x))"], model["log(1-D(G(z)))"], model["D_loss"], model["D_optimizer"]],
-                feed_dict={model["X"]: X[batch, :], model["z"]: z})
+            summary_str, loss, _, _ = sess.run(
+                [D_merged, model["D_loss"], model["D_optimizer"], model["D_maintain_ave_op"]],
+                feed_dict={model["X"]: X[batch], model["z"]: z})
             assert not np.isnan(loss)
             epoch_cost_D += loss / len(batches)
 
@@ -202,9 +233,9 @@ def train(sess, model, X, config):
             if (i + 1) % 1 == 0:
                 # Train generator. (Discriminator is fixed.)
                 z = sample_noise(shape=(len(batch), model["latent_dim"]))
-                summary_str, G_z, loss, _ = sess.run(
-                    [G_merged, model["G_z"], model["G_loss"], model["G_optimizer"]],
-                    feed_dict={model["X"]: X[batch, :], model["z"]: z})
+                summary_str, G_z, loss, _, _ = sess.run(
+                    [G_merged, model["G_z"], model["G_loss"], model["G_optimizer"], model["G_maintain_ave_op"]],
+                    feed_dict={model["X"]: X[batch], model["z"]: z})
                 assert not np.isnan(loss)
                 epoch_cost_G += loss / (len(batches) // 1)
 
@@ -234,9 +265,6 @@ def train(sess, model, X, config):
 
 
 if __name__ == "__main__":
-    # TODO:
-    # - minibatch discrimination
-
     # mnist = input_data.read_data_sets("data/", one_hot=True)
     # X = np.vstack([mnist.train.images,
     #                mnist.validation.images,
@@ -245,16 +273,16 @@ if __name__ == "__main__":
     X = np.random.normal(size=10**5).reshape((-1, 1))
 
     config = dict()
-    config["num_epochs"] = 10
-    config["batch_size"] = 128
+    config["num_epochs"] = 20
+    config["batch_size"] = 256
     config["logdir"] = "logs/"
 
     if os.path.exists(config["logdir"]):
         shutil.rmtree(config["logdir"])
 
     num_hidden = {
-        "generator": [256, 256],
-        "discriminator": [256, 256]
+        "generator": [5, 5],
+        "discriminator": [5, 5]
     }
 
     sess = tf.Session()
