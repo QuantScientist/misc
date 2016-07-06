@@ -14,6 +14,8 @@ import tensorflow as tf
 tf.set_random_seed(0)
 from tensorflow.examples.tutorials.mnist import input_data
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import animation
 import seaborn as sns
@@ -44,6 +46,8 @@ def fc(name, inputs, input_dim, output_dim, activation="tanh"):
             activation_fn = tf.nn.tanh
         elif activation == "relu":
             activation_fn = tf.nn.relu
+        elif activation == "elu":
+            activation_fn = tf.nn.elu
         elif activation == "linear":
             activation_fn = lambda x: x
 
@@ -60,12 +64,13 @@ def build_discriminator(X, num_features, num_hidden):
     D["md1"] = out = minibatch_discriminator("md1", out, num_hidden[0], num_hidden[0])
     D["dropout1"] = out = tf.nn.dropout(out, 0.2)
 
-    for i in range(len(num_hidden), 1):
+    for i in range(1, len(num_hidden)):
         out = fc("fc%d" % (i + 1), out,
                   input_dim=num_hidden[i-1], output_dim=num_hidden[i],
                   activation="linear")
         D["fc%d" % (i + 1)] = out = tf.nn.tanh(batch_norm(out))
-        D["md%d" % (i + 1)] = out = minibatch_discriminator(out, num_hidden[i], num_hidden[i])
+        D["md%d" % (i + 1)] = out = minibatch_discriminator(
+            "md%d" % (i+1), out, num_hidden[i], num_hidden[i])
 
     D["sigmoid"] = fc("sigmoid", out, input_dim=num_hidden[-1], output_dim=1,
                       activation="sigmoid")
@@ -94,19 +99,27 @@ def build_generator(z, num_features, latent_dim, num_hidden):
     G = {}
     out = fc("fc1", z, input_dim=latent_dim, output_dim=num_hidden[0],
              activation="linear")
-    # G["fc1"] = out = tf.nn.tanh(batch_norm(out))
-    G["fc1"] = out = tf.nn.tanh(out)
+    out = batch_norm(out)
+    out = tf.nn.elu(out)
+    G["fc1"] = out
 
-    for i in range(len(num_hidden), 1):
+    for i in range(1, len(num_hidden)):
         out = fc("fc%d" % (i + 1), out,
                  input_dim=num_hidden[i-1], output_dim=num_hidden[i],
                  activation="linear")
-        # G["fc%d" % (i + 1)] = out = tf.nn.tanh(batch_norm(out))
-        G["fc%d" % (i + 1)] = out = tf.nn.tanh(out)
+        out = batch_norm(out)
+        out = tf.nn.elu(out)
+        G["fc%d" % (i + 1)] = out
 
-    G["linear"] = fc("linear", out,
-                     input_dim=num_hidden[-1], output_dim=num_features,
-                     activation="linear")
+    out = fc("linear", out,
+             input_dim=num_hidden[-1], output_dim=num_hidden[-1],
+             activation="linear")
+    out = batch_norm(out)
+    out = fc("linear2", out,
+             input_dim=num_hidden[-1], output_dim=num_features,
+             activation="linear")
+    # out = tf.nn.log(out)
+    G["linear"] = out
     return G
 
 
@@ -148,11 +161,11 @@ def build_model(num_features, latent_dim, num_hidden):
         tf.scalar_summary("G/log(1-D(G(z)))", tf.reduce_mean(model["log(1-D(G(z)))"]))]
 
     # Feature matching
-    model["feature_matching"] = tf.square(
-        tf.reduce_mean(discriminator1["fc1"], 0) - tf.reduce_mean(discriminator2["fc1"], 0)
-    )
+    mean, var = tf.nn.moments(discriminator1["fc1"], axes=[0])
+    mean_, var_ = tf.nn.moments(discriminator2["fc1"], axes=[0])
+    model["feature_matching"] = tf.square(mean - mean_)
 
-    optimizer = tf.train.MomentumOptimizer(learning_rate=0.001, momentum=0.9)
+    optimizer = tf.train.AdamOptimizer()
     t_vars = tf.trainable_variables()
     D_vars = [v for v in t_vars if v.name.startswith("Discriminator")]
     G_vars = [v for v in t_vars if v.name.startswith("Generator")]
@@ -170,7 +183,7 @@ def build_model(num_features, latent_dim, num_hidden):
     model["D_optimizer"] = optimizer.apply_gradients(model["D_grads"])
     model["summary"]["discriminator"] += [tf.scalar_summary("D/loss", model["D_loss"])]
 
-    optimizer = tf.train.MomentumOptimizer(learning_rate=0.0003, momentum=0.9)
+    optimizer = tf.train.AdamOptimizer()
     # model["G_loss"] = tf.reduce_mean(model["log(1-D(G(z)))"] - model["log(D(G(z)))"])
     model["G_loss"] = tf.reduce_mean(model["feature_matching"])
     model["G_loss"] += model["G_historical_average"]
@@ -253,6 +266,11 @@ def train(sess, model, X, config):
     generated_samples = generated_samples[:10] + generated_samples[-10:]
 
     fig = plt.figure()
+    sns.kdeplot(X.reshape(-1), label="p(x)")
+    sns.kdeplot(generated_samples[-1].reshape(-1), label="p(G(z))")
+    fig.savefig("result.png")
+
+    fig = plt.figure()
 
     def init():
         sns.kdeplot(X.reshape(-1), label="p(x)")
@@ -260,7 +278,10 @@ def train(sess, model, X, config):
     def update(i):
         sns.kdeplot(generated_samples[i].reshape(-1))
 
-    ani = animation.FuncAnimation(fig, update, frames=len(generated_samples), repeat=False)
+    ani = animation.FuncAnimation(fig, update,
+                                  frames=len(generated_samples),
+                                  init_func=init,
+                                  repeat=False)
     ani.save("animation.gif", writer="imagemagick", fps=5)
 
 
@@ -274,15 +295,15 @@ if __name__ == "__main__":
 
     config = dict()
     config["num_epochs"] = 20
-    config["batch_size"] = 256
+    config["batch_size"] = 100
     config["logdir"] = "logs/"
 
     if os.path.exists(config["logdir"]):
         shutil.rmtree(config["logdir"])
 
     num_hidden = {
-        "generator": [5, 5],
-        "discriminator": [5, 5]
+        "generator": [5] * 5,
+        "discriminator": [32, 32]
     }
 
     sess = tf.Session()
