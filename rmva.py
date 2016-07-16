@@ -16,8 +16,9 @@ tf.set_random_seed(0)
 from tensorflow.examples.tutorials.mnist import input_data
 from keras.layers import Dense
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
 
 
 def glimpse_network(image, location):
@@ -47,10 +48,10 @@ def run(args):
     num_iterations = 50000 // 128 * 50
     num_steps = 5
     num_classes = 10
-    num_lstm_units = 128
+    num_lstm_units = 256
     num_lstm_layer = 1
-    alpha = 0.1
-    loc_var = 0.3
+    alpha = 1.0
+    loc_var = 0.1
 
     mnist = input_data.read_data_sets("data", one_hot=True)
 
@@ -59,7 +60,7 @@ def run(args):
     image = tf.placeholder(tf.float32, (None, 28, 28, 1))
     label = tf.placeholder(tf.int32, (None, num_classes))
 
-    lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(num_lstm_units, state_is_tuple=True)
+    lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(num_lstm_units, forget_bias=0., state_is_tuple=True)
     cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * num_lstm_layer, state_is_tuple=True)
 
     locations = [tf.random_uniform((batch_size, 2), minval=-1, maxval=1)]
@@ -87,9 +88,9 @@ def run(args):
     loss = tf.nn.softmax_cross_entropy_with_logits(logits, tf.cast(label, tf.float32))
 
     reinforce_loss = 0.
-    for i, (mean, log_var) in enumerate(loc_params):
-        p = 1. / tf.sqrt(2 * np.pi * log_var)
-        p *= tf.exp(-tf.square(locations[i] - mean) / (2 * log_var))
+    for i, (var, mean) in enumerate(loc_params):
+        p = 1. / tf.sqrt(2 * np.pi * loc_var)
+        p *= tf.exp(-tf.square(locations[i] - mean) / (2 * loc_var))
         if (i + 1) < (len(loc_params) - 1):  # if t <= T - 2
             R = 0.
         elif (i + 1) == (len(loc_params) - 1):  # if t = T - 1
@@ -102,7 +103,7 @@ def run(args):
 
     optimizer = tf.train.AdamOptimizer()
     tvars = tf.trainable_variables()
-    grads, _ = tf.clip_by_global_norm(tf.gradients(total_loss, tvars), 5.0)
+    grads, _ = tf.clip_by_global_norm(tf.gradients(total_loss, tvars), 1.0)
     train_step = optimizer.apply_gradients(zip(grads, tvars))
 
     # Training
