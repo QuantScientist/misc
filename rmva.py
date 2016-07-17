@@ -43,9 +43,13 @@ def glimpse_network(image, location):
     return feature
 
 
+def accuracy_score(y_preds, y_true):
+    return np.sum((y_preds == y_true).astype(np.int32)) / y_preds.shape[0]
+
+
 def run(args):
     batch_size = 128
-    num_iterations = 50000 // 128 * 50
+    num_epochs = 1000
     num_steps = 5
     num_classes = 10
     num_lstm_units = 256
@@ -63,21 +67,21 @@ def run(args):
     lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(num_lstm_units, forget_bias=0., state_is_tuple=True)
     cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * num_lstm_layer, state_is_tuple=True)
 
-    locations = [tf.random_uniform((batch_size, 2), minval=-1, maxval=1)]
-    loc_params = []
+    locations = []
+    loc_means = []
     state = initial_state = cell.zero_state(tf.shape(image)[0], dtype=tf.float32)
+    location_net = Dense(2, activation="tanh")
     with tf.variable_scope("RNN"):
         for time_step in range(num_steps):
             if time_step > 0:
                 tf.get_variable_scope().reuse_variables()
 
+            loc_mean = location_net(state[0].h)
+            locations += [tf.random_normal((batch_size, 2), loc_mean, loc_var)]
+            loc_means += [loc_mean]
+
             inputs = glimpse_network(image, locations[-1])
             (cell_output, state) = cell(inputs, state)
-
-            loc_mean = Dense(2, activation="tanh")(state[0].h)
-            locations += [tf.random_normal((batch_size, 2), loc_mean, loc_var)]
-
-            loc_params += [(loc_var, loc_mean)]
 
     logits = Dense(10)(state[0].h)
     inference = tf.nn.softmax(logits)
@@ -88,15 +92,13 @@ def run(args):
     loss = tf.nn.softmax_cross_entropy_with_logits(logits, tf.cast(label, tf.float32))
 
     reinforce_loss = 0.
-    for i, (var, mean) in enumerate(loc_params):
+    for i, (loc, mean) in enumerate(zip(locations, loc_means)):
         p = 1. / tf.sqrt(2 * np.pi * loc_var)
-        p *= tf.exp(-tf.square(locations[i] - mean) / (2 * loc_var))
-        if (i + 1) < (len(loc_params) - 1):  # if t <= T - 2
-            R = 0.
-        elif (i + 1) == (len(loc_params) - 1):  # if t = T - 1
+        p *= tf.exp(-tf.square(loc - mean) / (2 * loc_var))
+
+        R = 0
+        if (i + 1) == len(locations):  # for location_T-1
             R = reward
-        else:
-            break
         reinforce_loss += -tf.reduce_sum(alpha * R * tf.log(p), reduction_indices=[-1])
 
     total_loss = tf.reduce_mean(loss + reinforce_loss)
@@ -113,16 +115,41 @@ def run(args):
 
     saver = tf.train.Saver()
     if args.train == 1:
-        for i in range(num_iterations):
+        epoch_loss = []
+        epoch_acc = []
+        while mnist.train.epochs_completed < num_epochs:
+            current_epoch = mnist.train.epochs_completed
             batch_x, batch_y = mnist.train.next_batch(batch_size)
-            assert batch_x.shape[0] == batch_size
             preds, loss, _ = sess.run([prediction, total_loss, train_step],
                                       feed_dict={image: batch_x.reshape((-1, 28, 28, 1)), label: batch_y,
                                                  initial_state[0].c: initial_c, initial_state[0].h: initial_h})
+            epoch_loss += [loss]
+            epoch_acc += [accuracy_score(preds, np.argmax(batch_y, axis=1))]
 
-            if i % 100 == 0:
-                print("loss:", loss)
-                print("acc:", np.sum(preds.astype(np.int32) == np.argmax(batch_y, axis=1)) / batch_size * 100)
+            if mnist.train.epochs_completed != current_epoch:
+                print("[Epoch %d/%d]" % (current_epoch + 1, num_epochs))
+                print("loss:", np.asarray(epoch_loss).mean())
+                print("acc: ", np.asarray(epoch_acc).mean())
+
+                epoch_acc = []
+                epoch_loss = []
+
+                val_loss = []
+                val_acc = []
+                while mnist.validation.epochs_completed != 1:
+                    batch_x, batch_y = mnist.validation.next_batch(batch_size)
+                    preds, loss = sess.run([prediction, total_loss],
+                                           feed_dict={image: batch_x.reshape((-1, 28, 28, 1)), label: batch_y,
+                                                      initial_state[0].c: initial_c, initial_state[0].h: initial_h})
+                    val_loss += [loss]
+                    val_acc += [accuracy_score(preds, np.argmax(batch_y, axis=1))]
+                mnist.validation._epochs_completed = 0
+                mnist.validation._index_in_epoch = 0
+
+                print("Val loss:", np.asarray(val_loss).mean())
+                print("Val acc: ", np.asarray(val_acc).mean())
+
+
         saver.save(sess, "model.ckpt")
 
     if len(args.checkpoint) > 0:
