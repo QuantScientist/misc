@@ -3,6 +3,7 @@ from __future__ import division
 from __future__ import print_function
 
 import os
+import shutil
 import argparse
 from six.moves import range
 os.environ["KERAS_BACKEND"] = "tensorflow"
@@ -14,81 +15,44 @@ import tensorflow as tf
 tf.set_random_seed(0)
 
 from tensorflow.examples.tutorials.mnist import input_data
+import keras.backend as K
 from keras.layers import Dense
-from keras.preprocessing.image import apply_transform
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-
-def translate(batch_x, size=(128, 128)):
-    """Make translated mnist"""
-    height = batch_x.shape[1]
-    width = batch_x.shape[2]
-    tx = np.random.uniform(-(size[1] - width), 0)
-    ty = np.random.uniform(-(size[0] - height), 0)
-
-    translation_matrix = np.asarray([
-        [1, 0, tx],
-        [0, 1, ty],
-        [0, 0, 1]
-    ], dtype=batch_x.dtype)
-
-    X = np.zeros((batch_x.shape[0],) + size + (1,), dtype=batch_x.dtype)
-    X[:, :height, :width, :] = batch_x
-    for i, x in enumerate(X[:]):
-        X[i, :, :, :] = apply_transform(x, translation_matrix, channel_index=2, fill_mode="nearest", cval=0.)
-    return X
-
-
-def glimpse_network(image, location):
-    with tf.variable_scope("glimpse_network"):
-        glimpses = []
-
-        for size in [(8, 8), (16, 16), (32, 32)]:
-            glimpse = tf.image.extract_glimpse(image, size=[8, 8], offsets=location, uniform_noise=False)
-            glimpses += [tf.image.resize_images(glimpse, 8, 8)]
-
-        glimpses = tf.concat(3, glimpses)
-        glimpses = tf.reshape(glimpses, (-1, 8 * 8 * 3))
-
-        glimpse_feature = Dense(128, activation="relu")(glimpses)
-        location_feature = Dense(128, activation="relu")(location)
-
-        feature = Dense(256, activation="relu")(glimpse_feature + location_feature)
-        return feature
-
-
-def accuracy_score(y_preds, y_true):
-    return np.sum((y_preds == y_true).astype(np.int32)) / y_preds.shape[0]
+from utils import glimpse_network, accuracy_score, translate
 
 
 def run(args):
-    batch_size = 64
-    num_epochs = 1000
-    num_steps = 5
+    batch_size = args.batch_size
+    num_epochs = args.num_epochs
+    num_steps = args.num_time_steps
     num_classes = 10
-    num_lstm_units = 256
+    num_lstm_units = args.num_lstm_units
     num_lstm_layer = 1
-    alpha = 1.0
-    location_sigma = 0.01
+    alpha = args.alpha
+    location_sigma = args.location_sigma
 
-    image_rows = 128
-    image_cols = 128
+    image_rows, image_cols = [int(v) for v in args.image_size.split("x")]
 
     mnist = input_data.read_data_sets("data", one_hot=True)
 
     sess = tf.Session()
+    K.set_session(sess)
 
     image = tf.placeholder(tf.float32, (None, image_rows, image_cols, 1))
     label = tf.placeholder(tf.int32, (None, num_classes))
+
+    tf.image_summary("translated mnist", image, max_images=3)
 
     lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(num_lstm_units, forget_bias=0., state_is_tuple=True)
     cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * num_lstm_layer, state_is_tuple=True)
 
     locations = []
     loc_means = []
+    baselines = []
     state = initial_state = cell.zero_state(tf.shape(image)[0], dtype=tf.float32)
     location_net = Dense(2, activation="tanh")
     with tf.variable_scope("RNN"):
@@ -96,37 +60,55 @@ def run(args):
             if time_step > 0:
                 tf.get_variable_scope().reuse_variables()
 
-            loc_mean = location_net(state[0].c)
+            loc_mean = location_net(state[0].h)
             locations += [tf.random_normal((batch_size, 2), loc_mean, location_sigma)]
             loc_means += [loc_mean]
 
-            inputs = glimpse_network(image, locations[-1])
+            baselines += [Dense(1, activation="relu")(state[0].h)]
+
+            inputs, glimpses = glimpse_network(image, locations[-1], sizes=[(8, 8), (16, 16), (32, 32)],
+                                               glimpse_num_features=128, location_num_features=128,
+                                               output_dim=256)
             (cell_output, state) = cell(inputs, state)
 
-    logits = Dense(num_classes)(state[0].c)
+            tf.image_summary("8x8 glimpse t=%d" % time_step, glimpses[-1], max_images=5)
+
+    logits = Dense(num_classes)(state[0].h)
     inference = tf.nn.softmax(logits)
     prediction = tf.arg_max(inference, 1)
     reward = tf.cast(tf.equal(prediction, tf.arg_max(label, 1)), tf.float32)
     reward = tf.stop_gradient(tf.expand_dims(reward, 1))
 
     loss = tf.nn.softmax_cross_entropy_with_logits(logits, tf.cast(label, tf.float32))
+    tf.scalar_summary("xentropy", tf.reduce_mean(loss))
 
     reinforce_loss = 0.
+    baseline_loss = 0.
     for i, (loc, mean) in enumerate(zip(locations, loc_means)):
-        p = 1. / tf.sqrt(2 * np.pi * np.square(location_sigma))
-        p *= tf.exp(-tf.square(loc - mean) / (2 * np.square(location_sigma)))
+        p = 1. / tf.sqrt(2 * np.pi * tf.square(location_sigma))
+        p *= tf.exp(-tf.square(loc - mean) / (2 * tf.square(location_sigma)))
 
-        R = 0
+        b = baselines[i]
+        tf.scalar_summary("baseline%d" % i, tf.reduce_mean(b))
+
+        R = 0.
         if (i + 1) == len(locations):  # for location_T-1
             R = reward
-        reinforce_loss += -tf.reduce_sum(alpha * R * tf.log(p), reduction_indices=[-1])
+        reinforce_loss += -tf.reduce_sum(alpha * (R - b) * tf.log(p), reduction_indices=[-1])
+        baseline_loss += tf.reduce_sum(tf.squared_difference(R, b))
+    tf.scalar_summary("loss:reinforce", tf.reduce_mean(reinforce_loss))
+    tf.scalar_summary("loss:baseline", tf.reduce_mean(baseline_loss))
 
-    total_loss = tf.reduce_mean(loss + reinforce_loss)
+    total_loss = tf.reduce_mean(loss + reinforce_loss + baseline_loss)
+    tf.scalar_summary("loss:total", total_loss)
 
     optimizer = tf.train.AdamOptimizer()
     tvars = tf.trainable_variables()
     grads, _ = tf.clip_by_global_norm(tf.gradients(total_loss, tvars), 1.0)
     train_step = optimizer.apply_gradients(zip(grads, tvars))
+
+    merged = tf.merge_all_summaries()
+    summary_writer = tf.train.SummaryWriter(args.logdir, sess.graph)
 
     # Training
     sess.run(tf.initialize_all_variables())
@@ -137,16 +119,21 @@ def run(args):
     if args.train == 1:
         epoch_loss = []
         epoch_acc = []
+
+        global_step = 0
         while mnist.train.epochs_completed < num_epochs:
             current_epoch = mnist.train.epochs_completed
             batch_x, batch_y = mnist.train.next_batch(batch_size)
             batch_x = translate(batch_x.reshape((-1, 28, 28, 1)), size=(image_rows, image_cols))
 
-            preds, loss, _ = sess.run([prediction, total_loss, train_step],
-                                      feed_dict={image: batch_x, label: batch_y,
-                                                 initial_state[0].c: initial_c, initial_state[0].h: initial_h})
+            preds, loss, summary, _ = sess.run([prediction, total_loss, merged, train_step],
+                                               feed_dict={image: batch_x, label: batch_y,
+                                                          initial_state[0].c: initial_c, initial_state[0].h: initial_h})
             epoch_loss += [loss]
             epoch_acc += [accuracy_score(preds, np.argmax(batch_y, axis=1))]
+
+            summary_writer.add_summary(summary, global_step)
+            global_step += 1
 
             if mnist.train.epochs_completed != current_epoch:
                 print("[Epoch %d/%d]" % (current_epoch + 1, num_epochs))
@@ -202,6 +189,18 @@ def run(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--train", dest="train", type=int, default=1)
-    parser.add_argument("--checkpoint", dest="checkpoint", type=str, default="")
+    parser.add_argument("--checkpoint", dest="checkpoint", type=str, default="model.ckpt")
+    parser.add_argument("--logdir", dest="logdir", type=str, default="logs")
+    parser.add_argument("--num_epochs", dest="num_epochs", type=int, default=1)
+    parser.add_argument("--batch_size", dest="batch_size", type=int, default=64)
+    parser.add_argument("--num_time_steps", dest="num_time_steps", type=int, default=5)
+    parser.add_argument("--num_lstm_units", dest="num_lstm_units", type=int, default=256)
+    parser.add_argument("--image_size", dest="image_size", type=str, default="128x128")
+    parser.add_argument("--alpha", dest="alpha", type=float, default=1.0)
+    parser.add_argument("--location_sigma", dest="location_sigma", type=float, default=0.01)
     args = parser.parse_args()
+
+    if os.path.exists(args.logdir):
+        shutil.rmtree(args.logdir)
+
     run(args)
