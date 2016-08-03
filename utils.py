@@ -1,3 +1,7 @@
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
 import numpy as np
 import tensorflow as tf
 
@@ -27,7 +31,7 @@ def glimpse_network(image, location, sizes, activation="relu",
 
 
 def accuracy_score(y_preds, y_true):
-    return np.sum((y_preds == y_true).astype(np.int32)) / y_preds.shape[0]
+    return np.sum((y_preds == y_true).astype(np.float32)) / y_preds.shape[0]
 
 
 def translate(batch_x, size=(128, 128)):
