@@ -58,7 +58,7 @@ def run(args):
             if time_step > 0:
                 tf.get_variable_scope().reuse_variables()
 
-            loc_mean = location_net(state[0].c)
+            loc_mean = location_net(state[0].h)
             locations += [tf.random_normal((batch_size, 2), loc_mean, location_sigma)]
             loc_means += [loc_mean]
 
@@ -69,7 +69,7 @@ def run(args):
 
             tf.image_summary("8x8 glimpse t=%d" % time_step, glimpses[-1], max_images=5)
 
-    logits = Dense(num_classes)(state[0].c)
+    logits = Dense(num_classes)(state[0].h)
     inference = tf.nn.softmax(logits)
     prediction = tf.arg_max(inference, 1)
     reward = tf.cast(tf.equal(prediction, tf.arg_max(label, 1)), tf.float32)
