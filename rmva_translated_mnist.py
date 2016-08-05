@@ -22,7 +22,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from utils import glimpse_network, accuracy_score, translate
+from utils import take_glimpses, accuracy_score, translate
 
 
 def run(args):
@@ -47,14 +47,20 @@ def run(args):
 
     tf.image_summary("translated mnist", image, max_images=3)
 
-    lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(num_lstm_units, forget_bias=0., state_is_tuple=True)
+    lstm_cell = tf.nn.rnn_cell.LSTMCell(num_lstm_units, forget_bias=0., state_is_tuple=True)
     cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * num_lstm_layer, state_is_tuple=True)
 
     locations = []
     loc_means = []
     baselines = []
     state = initial_state = cell.zero_state(tf.shape(image)[0], dtype=tf.float32)
+
     location_net = Dense(2, activation="tanh")
+    location_feature = Dense(128, activation="relu")
+    glimpse_feature = Dense(128, activation="relu")
+    glimpse_net = Dense(256, activation="relu", input_shape=(128,))
+    baseline_net = Dense(1, activation="sigmoid")
+
     with tf.variable_scope("RNN"):
         for time_step in range(num_steps):
             if time_step > 0:
@@ -64,11 +70,16 @@ def run(args):
             locations += [tf.random_normal((batch_size, 2), loc_mean, location_sigma)]
             loc_means += [loc_mean]
 
-            baselines += [Dense(1, activation="relu")(state[0].h)]
+            if args.baseline:
+                baselines += [baseline_net(state[0].h)]
 
-            inputs, glimpses = glimpse_network(image, locations[-1], sizes=[(8, 8), (16, 16), (32, 32)],
-                                               glimpse_num_features=128, location_num_features=128,
-                                               output_dim=256)
+            size = (8, 8)
+            sizes = [(size[0] * (i + 1), size[1] * (i + 1)) for i in range(len(3))]
+            glimpses = take_glimpses(image, locations[-1], sizes)
+            glimpse = tf.concat(3, glimpses)
+            glimpse = tf.reshape(glimpse, (-1, np.prod(size) * len(sizes)))
+
+            inputs = glimpse_net(glimpse_feature(glimpse) + location_feature(locations[-1]))
             (cell_output, state) = cell(inputs, state)
 
             tf.image_summary("8x8 glimpse t=%d" % time_step, glimpses[-1], max_images=5)
@@ -88,23 +99,29 @@ def run(args):
         p = 1. / tf.sqrt(2 * np.pi * tf.square(location_sigma))
         p *= tf.exp(-tf.square(loc - mean) / (2 * tf.square(location_sigma)))
 
-        b = baselines[i]
-        tf.scalar_summary("baseline%d" % i, tf.reduce_mean(b))
-
         R = 0.
         if (i + 1) == len(locations):  # for location_T-1
             R = reward
+
+        if args.baseline:
+            b = baselines[i]
+            tf.scalar_summary("baseline%d" % i, tf.reduce_mean(b))
+            baseline_loss += tf.reduce_sum(tf.squared_difference(R, b))
+        else:
+            b = 0.
+
         reinforce_loss += -tf.reduce_sum(alpha * (R - b) * tf.log(p), reduction_indices=[-1])
-        baseline_loss += tf.reduce_sum(tf.squared_difference(R, b))
     tf.scalar_summary("loss:reinforce", tf.reduce_mean(reinforce_loss))
-    tf.scalar_summary("loss:baseline", tf.reduce_mean(baseline_loss))
+
+    if args.baseline:
+        tf.scalar_summary("loss:baseline", tf.reduce_mean(baseline_loss))
 
     total_loss = tf.reduce_mean(loss + reinforce_loss + baseline_loss)
     tf.scalar_summary("loss:total", total_loss)
 
     optimizer = tf.train.AdamOptimizer()
     tvars = tf.trainable_variables()
-    grads, _ = tf.clip_by_global_norm(tf.gradients(total_loss, tvars), 1.0)
+    grads = tf.gradients(total_loss, tvars)
     train_step = optimizer.apply_gradients(zip(grads, tvars))
 
     merged = tf.merge_all_summaries()
@@ -198,6 +215,8 @@ if __name__ == "__main__":
     parser.add_argument("--image_size", dest="image_size", type=str, default="128x128")
     parser.add_argument("--alpha", dest="alpha", type=float, default=1.0)
     parser.add_argument("--location_sigma", dest="location_sigma", type=float, default=0.01)
+    parser.add_argument("--baseline", dest="baseline", action="store_true")
+    parser.add_argument("--no-baseline", dest="baseline", action="store_false")
     args = parser.parse_args()
 
     if os.path.exists(args.logdir):

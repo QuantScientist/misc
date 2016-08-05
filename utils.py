@@ -9,6 +9,18 @@ from keras.layers import Dense
 from keras.preprocessing.image import apply_transform
 
 
+def take_glimpses(image, location, sizes):
+    glimpses = []
+
+    resize = sizes[0]
+    for size in sizes:
+        glimpse = tf.image.extract_glimpse(image, size=size, offsets=location,
+                                           normalized=True, centered=True)
+        glimpses += [tf.image.resize_images(glimpse, resize[0], resize[1])]
+
+    return glimpses
+
+
 def glimpse_network(image, location, sizes, activation="relu",
                     glimpse_num_features=128, location_num_features=128, output_dim=256):
     assert len(sizes) == 3
@@ -18,10 +30,11 @@ def glimpse_network(image, location, sizes, activation="relu",
 
         resize = sizes[0]
         for size in sizes:
-            glimpse = tf.image.extract_glimpse(image, size=size, offsets=location, uniform_noise=False)
+            glimpse = tf.image.extract_glimpse(image, size=size, offsets=location, uniform_noise=False,
+                                               normalized=True, centered=True)
             glimpses += [tf.image.resize_images(glimpse, resize[0], resize[1])]
 
-        glimpse = tf.concat(len(sizes), glimpses)
+        glimpse = tf.concat(-1, glimpses)
         glimpse = tf.reshape(glimpse, (-1, np.prod(resize) * len(sizes)))
         glimpse_feature = Dense(glimpse_num_features, activation=activation)(glimpse)
         location_feature = Dense(location_num_features, activation=activation)(location)
