@@ -74,7 +74,7 @@ def run(args):
                 baselines += [baseline_net(state[0].h)]
 
             size = (8, 8)
-            sizes = [(size[0] * (i + 1), size[1] * (i + 1)) for i in range(len(3))]
+            sizes = [(size[0] * (i + 1), size[1] * (i + 1)) for i in range(3)]
             glimpses = take_glimpses(image, locations[-1], sizes)
             glimpse = tf.concat(3, glimpses)
             glimpse = tf.reshape(glimpse, (-1, np.prod(size) * len(sizes)))
