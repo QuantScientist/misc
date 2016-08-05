@@ -14,6 +14,8 @@ from keras import activations
 from keras.utils import np_utils
 import keras.backend as K
 
+from keras.utils.visualize_util import plot
+
 
 class ConvLSTM(Layer):
 
@@ -140,9 +142,9 @@ class ConvLSTM(Layer):
         cols = input_shape[4]
 
         if self.return_sequences:
-            return (input_shape[0], self.nb_filter, rows, cols)
-        else:
             return (input_shape[0], input_shape[1], self.nb_filter, rows, cols)
+        else:
+            return (input_shape[0], self.nb_filter, rows, cols)
 
     def get_config(self):
         config = {"nb_filter": self.nb_filter,
@@ -161,19 +163,20 @@ if __name__ == "__main__":
     batch_size = 16
     nb_class = 10
 
-    nb_time_step = 1
+    nb_time_step = 2
     nb_channel = 1
     img_rows = 28
     img_cols = 28
 
-    inputs = Input(shape=(nb_channel, img_rows, img_cols))
-    x = Reshape((1, nb_channel, img_rows, img_cols))(inputs)
-    x = ConvLSTM(8, 3, 3, return_sequences=False)(x)
+    inputs = Input(shape=(nb_time_step, nb_channel, img_rows, img_cols))
+    x = ConvLSTM(8, 3, 3, return_sequences=False)(inputs)
     x = Flatten()(x)
     x = Dense(10, activation="softmax")(x)
     model = Model(input=inputs, output=x)
     model.compile(optimizer="sgd", loss="categorical_crossentropy",
                   metrics=["accuracy"])
+
+    plot(model, show_shapes=True)
 
     (X_train, y_train), (X_val, y_val) = mnist.load_data()
 
@@ -183,6 +186,10 @@ if __name__ == "__main__":
     X_val = X_val.astype('float32')
     X_train /= 255
     X_val /= 255
+
+    X_train = np.repeat(X_train[:, None, :, :, :], nb_time_step, 1)
+    X_val = np.repeat(X_val[:, None, :, :, :], nb_time_step, 1)
+
     print('X_train shape:', X_train.shape)
     print(X_train.shape[0], 'train samples')
     print(X_val.shape[0], 'validation samples')
