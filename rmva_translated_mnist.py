@@ -25,6 +25,12 @@ import matplotlib.pyplot as plt
 from utils import take_glimpses, accuracy_score, translate
 
 
+def glimpse_net(glimpse_feature, location_feature):
+    h_g = Dense(256, name="linear_h_g")(glimpse_feature)
+    h_l = Dense(256, name="linear_h_l")(location_feature)
+    return Dense(256, activation="relu", name="glimpse_net")(h_g + h_l)
+
+
 def run(args):
     batch_size = args.batch_size
     num_epochs = args.num_epochs
@@ -34,6 +40,7 @@ def run(args):
     num_lstm_layer = 1
     alpha = args.alpha
     location_sigma = args.location_sigma
+    glimpse_size = (12, 12)
 
     image_rows, image_cols = [int(v) for v in args.image_size.split("x")]
 
@@ -49,42 +56,38 @@ def run(args):
 
     lstm_cell = tf.nn.rnn_cell.LSTMCell(num_lstm_units, forget_bias=0., state_is_tuple=True)
     cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * num_lstm_layer, state_is_tuple=True)
+    state = initial_state = cell.zero_state(tf.shape(image)[0], dtype=tf.float32)
+
+    location_net = Dense(2, activation="tanh", name="location_net")
+    location_feature = Dense(128, activation="relu", name="location_feature")
+    glimpse_feature = Dense(128, activation="relu", name="glimpse_feature")
+    baseline_net = Dense(1, activation="sigmoid", name="baseline_net")
 
     locations = []
     loc_means = []
-    baselines = []
-    state = initial_state = cell.zero_state(tf.shape(image)[0], dtype=tf.float32)
-
-    location_net = Dense(2, activation="tanh")
-    location_feature = Dense(128, activation="relu")
-    glimpse_feature = Dense(128, activation="relu")
-    glimpse_net = Dense(256, activation="relu", input_shape=(128,))
-    baseline_net = Dense(1, activation="sigmoid")
 
     with tf.variable_scope("RNN"):
         for time_step in range(num_steps):
             if time_step > 0:
                 tf.get_variable_scope().reuse_variables()
 
-            loc_mean = location_net(state[0].h)
+            h_tm1 = state[0].h
+            loc_mean = location_net(h_tm1)
+            tf.histogram_summary("loc_mean(t=%d)" % time_step, loc_mean)
             locations += [tf.random_normal((batch_size, 2), loc_mean, location_sigma)]
             loc_means += [loc_mean]
 
-            if args.baseline:
-                baselines += [baseline_net(state[0].h)]
-
-            size = (8, 8)
-            sizes = [(size[0] * (i + 1), size[1] * (i + 1)) for i in range(3)]
+            sizes = [(glimpse_size[0] * (i + 1), glimpse_size[1] * (i + 1))
+                     for i in range(3)]
             glimpses = take_glimpses(image, locations[-1], sizes)
             glimpse = tf.concat(3, glimpses)
-            glimpse = tf.reshape(glimpse, (-1, np.prod(size) * len(sizes)))
+            glimpse = tf.reshape(glimpse, (-1, np.prod(glimpse_size) * len(sizes)))
 
-            inputs = glimpse_net(glimpse_feature(glimpse) + location_feature(locations[-1]))
+            inputs = glimpse_net(glimpse_feature(glimpse), location_feature(locations[-1]))
             (cell_output, state) = cell(inputs, state)
+            tf.image_summary("12x12 glimpse t=%d" % time_step, glimpses[-1], max_images=5)
 
-            tf.image_summary("8x8 glimpse t=%d" % time_step, glimpses[-1], max_images=5)
-
-    logits = Dense(num_classes)(state[0].h)
+    logits = Dense(num_classes, name="logits")(state[0].h)
     inference = tf.nn.softmax(logits)
     prediction = tf.arg_max(inference, 1)
     reward = tf.cast(tf.equal(prediction, tf.arg_max(label, 1)), tf.float32)
@@ -93,28 +96,19 @@ def run(args):
     loss = tf.nn.softmax_cross_entropy_with_logits(logits, tf.cast(label, tf.float32))
     tf.scalar_summary("xentropy", tf.reduce_mean(loss))
 
-    reinforce_loss = 0.
+    R = reward
+    b = 0.
     baseline_loss = 0.
-    for i, (loc, mean) in enumerate(zip(locations, loc_means)):
-        p = 1. / tf.sqrt(2 * np.pi * tf.square(location_sigma))
-        p *= tf.exp(-tf.square(loc - mean) / (2 * tf.square(location_sigma)))
-
-        R = 0.
-        if (i + 1) == len(locations):  # for location_T-1
-            R = reward
-
-        if args.baseline:
-            b = baselines[i]
-            tf.scalar_summary("baseline%d" % i, tf.reduce_mean(b))
-            baseline_loss += tf.reduce_sum(tf.squared_difference(R, b))
-        else:
-            b = 0.
-
-        reinforce_loss += -tf.reduce_sum(alpha * (R - b) * tf.log(p), reduction_indices=[-1])
-    tf.scalar_summary("loss:reinforce", tf.reduce_mean(reinforce_loss))
-
     if args.baseline:
+        b = baseline_net(state[0].h)
+        tf.scalar_summary("baseline", tf.reduce_mean(b))
+        baseline_loss = tf.reduce_sum(tf.squared_difference(R, b))
         tf.scalar_summary("loss:baseline", tf.reduce_mean(baseline_loss))
+
+    p = 1. / tf.sqrt(2 * np.pi * tf.square(location_sigma))
+    p *= tf.exp(-tf.square(locations[-1] - loc_means[-1]) / (2 * tf.square(location_sigma)))
+    reinforce_loss = -tf.reduce_sum(alpha * (R - b) * tf.log(p), reduction_indices=[-1])
+    tf.scalar_summary("loss:reinforce", tf.reduce_mean(reinforce_loss))
 
     total_loss = tf.reduce_mean(loss + reinforce_loss + baseline_loss)
     tf.scalar_summary("loss:total", total_loss)
