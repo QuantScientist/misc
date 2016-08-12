@@ -25,12 +25,6 @@ import matplotlib.pyplot as plt
 from utils import take_glimpses, accuracy_score, translate
 
 
-def glimpse_net(glimpse_feature, location_feature):
-    h_g = Dense(256, name="linear_h_g")(glimpse_feature)
-    h_l = Dense(256, name="linear_h_l")(location_feature)
-    return Dense(256, activation="relu", name="glimpse_net")(h_g + h_l)
-
-
 def run(args):
     batch_size = args.batch_size
     num_epochs = args.num_epochs
@@ -62,6 +56,9 @@ def run(args):
     location_feature = Dense(128, activation="relu", name="location_feature")
     glimpse_feature = Dense(128, activation="relu", name="glimpse_feature")
     baseline_net = Dense(1, activation="sigmoid", name="baseline_net")
+    h_g = Dense(256, name="linear_h_g")
+    h_l = Dense(256, name="linear_h_l")
+    glimpse_net = Dense(256, activation="relu", name="glimpse_net")
 
     locations = []
     loc_means = []
@@ -83,7 +80,10 @@ def run(args):
             glimpse = tf.concat(3, glimpses)
             glimpse = tf.reshape(glimpse, (-1, np.prod(glimpse_size) * len(sizes)))
 
-            inputs = glimpse_net(glimpse_feature(glimpse), location_feature(locations[-1]))
+            l_feature = location_feature(locations[-1])
+            g_feature = glimpse_feature(glimpse)
+
+            inputs = glimpse_net(h_g(g_feature) + h_l(l_feature))
             (cell_output, state) = cell(inputs, state)
             tf.image_summary("12x12 glimpse t=%d" % time_step, glimpses[-1], max_images=5)
 
@@ -94,26 +94,32 @@ def run(args):
     reward = tf.stop_gradient(tf.expand_dims(reward, 1))
 
     loss = tf.nn.softmax_cross_entropy_with_logits(logits, tf.cast(label, tf.float32))
-    tf.scalar_summary("xentropy", tf.reduce_mean(loss))
+    loss = tf.reduce_mean(loss)
+    tf.scalar_summary("xentropy", loss)
 
     R = reward
-    b = 0.
+    b_val = 0.
     baseline_loss = 0.
     if args.baseline:
         b = baseline_net(state[0].h)
+        b_val = tf.stop_gradient(b)
         tf.scalar_summary("baseline", tf.reduce_mean(b))
-        baseline_loss = tf.reduce_sum(tf.squared_difference(R, b))
-        tf.scalar_summary("loss:baseline", tf.reduce_mean(baseline_loss))
+        baseline_loss = tf.reduce_mean(tf.squared_difference(R, b))
+        tf.scalar_summary("loss:baseline", baseline_loss)
 
     p = 1. / tf.sqrt(2 * np.pi * tf.square(location_sigma))
     p *= tf.exp(-tf.square(locations[-1] - loc_means[-1]) / (2 * tf.square(location_sigma)))
-    reinforce_loss = -tf.reduce_sum(alpha * (R - b) * tf.log(p), reduction_indices=[-1])
-    tf.scalar_summary("loss:reinforce", tf.reduce_mean(reinforce_loss))
+    reinforce_loss = -tf.reduce_mean(alpha * (R - b_val) * tf.log(p))
+    tf.scalar_summary("loss:reinforce", reinforce_loss)
 
-    total_loss = tf.reduce_mean(loss + reinforce_loss + baseline_loss)
+    total_loss = loss + reinforce_loss + baseline_loss
     tf.scalar_summary("loss:total", total_loss)
 
-    optimizer = tf.train.AdamOptimizer()
+    if str.lower(args.optimizer) == "adam":
+        optimizer = tf.train.AdamOptimizer(learning_rate=args.learning_rate)
+    elif str.lower(args.optimizer) == "momentum":
+        optimizer = tf.train.MomentumOptimizer(learning_rate=args.learning_rate, momentum=args.momentum)
+
     tvars = tf.trainable_variables()
     grads = tf.gradients(total_loss, tvars)
     train_step = optimizer.apply_gradients(zip(grads, tvars))
@@ -139,7 +145,8 @@ def run(args):
 
             preds, loss, summary, _ = sess.run([prediction, total_loss, merged, train_step],
                                                feed_dict={image: batch_x, label: batch_y,
-                                                          initial_state[0].c: initial_c, initial_state[0].h: initial_h})
+                                                          initial_state[0].c: initial_c, initial_state[0].h: initial_h,
+                                                          K.learning_phase(): 1})
             epoch_loss += [loss]
             epoch_acc += [accuracy_score(preds, np.argmax(batch_y, axis=1))]
 
@@ -162,7 +169,8 @@ def run(args):
                     preds, loss = sess.run([prediction, total_loss],
                                            feed_dict={image: batch_x.reshape((-1, image_rows, image_cols, 1)),
                                                       label: batch_y,
-                                                      initial_state[0].c: initial_c, initial_state[0].h: initial_h})
+                                                      initial_state[0].c: initial_c, initial_state[0].h: initial_h,
+                                                      K.learning_phase(): 0})
                     val_loss += [loss]
                     val_acc += [accuracy_score(preds, np.argmax(batch_y, axis=1))]
                 mnist.validation._epochs_completed = 0
@@ -180,7 +188,8 @@ def run(args):
     batch_x = translate(batch_x.reshape((-1, 28, 28, 1)), size=(image_rows, image_cols))
 
     locs = sess.run(locations, feed_dict={image: batch_x.reshape((-1, image_rows, image_cols, 1)),
-                                          initial_state[0].c: initial_c, initial_state[0].h: initial_h})
+                                          initial_state[0].c: initial_c, initial_state[0].h: initial_h,
+                                          K.learning_phase(): 0})
 
     img = batch_x[0].reshape(image_rows, image_cols)
     locs = np.asarray(locs, dtype=np.float32)[:, 0, :]
@@ -211,7 +220,12 @@ if __name__ == "__main__":
     parser.add_argument("--location_sigma", dest="location_sigma", type=float, default=0.01)
     parser.add_argument("--baseline", dest="baseline", action="store_true")
     parser.add_argument("--no-baseline", dest="baseline", action="store_false")
+    parser.add_argument("--lr", dest="learning_rate", default=1e-3, type=float)
+    parser.add_argument("--optimizer", dest="optimizer", default="momentum")
+    parser.add_argument("--momentum", dest="momentum", default=0.9, type=float)
     args = parser.parse_args()
+
+    assert str.lower(args.optimizer) in ["adam", "momentum"]
 
     if os.path.exists(args.logdir):
         shutil.rmtree(args.logdir)
