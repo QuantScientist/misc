@@ -8,6 +8,8 @@ import tensorflow as tf
 from keras.layers import Dense
 from keras.preprocessing.image import apply_transform
 
+import matplotlib.pyplot as plt
+
 
 def take_glimpses(image, location, sizes):
     glimpses = []
@@ -65,3 +67,20 @@ def translate(batch_x, size=(128, 128)):
 
         X[i, :, :, :] = apply_transform(x, translation_matrix, channel_index=2, fill_mode="nearest", cval=0.)
     return X
+
+
+def plot_glimpse(images, locations, name="glimpse.png"):
+    image = images[0]
+    location = locations[:, 0, :]
+
+    fig = plt.figure()
+    plt.imshow(image, cmap=plt.get_cmap("gray"))
+    plt.plot(location[:, 0], location[:, 1])
+    for i, (x, y) in enumerate(location):
+        plt.annotate("t=%d" % i, xy=(x, y), xytext=(-10, 10),
+                     textcoords="offset points", ha="right", va="bottom",
+                     bbox=dict(boxstyle="round, pad=0.5", fc="white", alpha=0.5),
+                     arrowprops=dict(arrowstyle="->", connectionstyle="arc3, rad=0"))
+    plt.savefig(name)
+    plt.gcf().clear()
+    plt.close("all")
