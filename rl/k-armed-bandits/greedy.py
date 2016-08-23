@@ -21,6 +21,7 @@ parser.add_argument("--k", dest="k", type=int, default=10)
 parser.add_argument("--num_iteration", dest="num_iteration", type=int, default=1000)
 parser.add_argument("--epsilon", dest="epsilon", type=float, default=0.)
 parser.add_argument("--seed", dest="seed", type=int, default=0)
+parser.add_argument("--Q_init", type=float, default=0., dest="Q_init")
 args = parser.parse_args()
 
 np.random.seed(args.seed)
@@ -31,12 +32,12 @@ q_a = np.random.normal(loc=0.0, scale=1.0, size=args.k)
 R = np.zeros((args.k, args.num_iteration))
 for arm in range(args.k):
     R[arm, :] = np.random.normal(q_a[arm], scale=1.0, size=args.num_iteration)
-optimal_choices = np.argmax(R, axis=0)
+optimal_action = np.argmax(q_a)
 
 
 def run(args, epsilon=args.epsilon):
     choices = np.zeros((args.k, args.num_iteration))  # choices[i, j] = 1 if arm_i was selected at j-th iteration
-    Q_a = np.zeros((args.k, args.num_iteration))
+    Q_a = np.zeros((args.k, args.num_iteration)) + args.Q_init
     rewards = np.zeros((args.num_iteration,))
 
     for t in range(args.num_iteration):
@@ -75,7 +76,7 @@ for arm in range(args.k):
     R_[arm, :] = np.random.normal(Q_a[arm], scale=1.0, size=args.num_iteration)
 df = pd.DataFrame(data=R_.transpose([1, 0]))
 sns.violinplot(df)
-sns.utils.axlabel("Arm", "Expected reward")
+sns.utils.axlabel("Arm", "Estimated reward")
 
 plt.subplot2grid((3, 2), (1, 0))
 plt.title("epsilon=%.1f" % args.epsilon)
@@ -89,7 +90,7 @@ sns.utils.axlabel("Iteration", "Optimal action")
 epsilons = np.union1d(np.asarray([args.epsilon]), np.arange(0, 1.1, step=0.3))
 for epsilon in epsilons:
     choices, _, rewards = run(args, epsilon)
-    is_optimal = (optimal_choices == np.argmax(choices, axis=0)).astype(np.float32)
+    is_optimal = (optimal_action == np.argmax(choices, axis=0)).astype(np.float32)
 
     total_reward = 0.
     optimal_choice_count = 0.
