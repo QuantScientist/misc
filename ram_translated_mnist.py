@@ -167,9 +167,9 @@ def run(args):
             if mnist.train.epochs_completed != current_epoch:
                 print("[Epoch %d/%d]" % (current_epoch + 1, num_epochs))
                 print("loss:", np.asarray(epoch_loss).mean())
-                print("reinforce_loss: %.5f+/-%.5f",
+                print("reinforce_loss: %.5f+/-%.5f" % (
                       np.asarray(epoch_reinforce_loss).mean(),
-                      np.asarray(epoch_reinforce_loss).std())
+                      np.asarray(epoch_reinforce_loss).std()))
                 print("acc: ", np.asarray(epoch_acc).mean())
 
                 epoch_acc = []
