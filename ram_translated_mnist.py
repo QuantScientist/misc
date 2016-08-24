@@ -168,7 +168,8 @@ def run(args):
                 print("[Epoch %d/%d]" % (current_epoch + 1, num_epochs))
                 print("loss:", np.asarray(epoch_loss).mean())
                 print("reinforce_loss: %.5f+/-%.5f",
-                      np.asarray(reinforce_loss).mean(), np.asarray(reinforce_loss).std())
+                      np.asarray(epoch_reinforce_loss).mean(),
+                      np.asarray(epoch_reinforce_loss).std())
                 print("acc: ", np.asarray(epoch_acc).mean())
 
                 epoch_acc = []
@@ -203,7 +204,7 @@ def run(args):
                 print("Val reinforce_loss: %.5f+/-%.5f",
                       np.asarray(val_reinforce_loss).mean(), np.asarray(val_reinforce_loss).std())
                 print("Val acc: ", np.asarray(val_acc).mean())
-        saver.save(sess, "model.ckpt")
+        saver.save(sess, args.checkpoint)
 
     if len(args.checkpoint) > 0:
         saver.restore(sess, args.checkpoint)
