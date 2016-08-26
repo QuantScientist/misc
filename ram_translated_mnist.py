@@ -201,8 +201,9 @@ def run(args):
                 mnist.validation._index_in_epoch = 0
 
                 print("Val loss:", np.asarray(val_loss).mean())
-                print("Val reinforce_loss: %.5f+/-%.5f",
-                      np.asarray(val_reinforce_loss).mean(), np.asarray(val_reinforce_loss).std())
+                print("Val reinforce_loss: %.5f+/-%.5f" % (
+                      np.asarray(val_reinforce_loss).mean(),
+                      np.asarray(val_reinforce_loss).std()))
                 print("Val acc: ", np.asarray(val_acc).mean())
         saver.save(sess, args.checkpoint)
 
