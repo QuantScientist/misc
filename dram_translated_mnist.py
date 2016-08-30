@@ -114,12 +114,12 @@ def run(args):
         for t in range(num_time_steps):
             if t > 0:
                 scope.reuse_variables()
-
-            baselines += [baseline_net(state[1].h)]
+            baselines += [baseline_net(tf.stop_gradient(state[1].h))]
 
             sizes = [(glimpse_size[0] * (i + 1), glimpse_size[1] * (i + 1))
                      for i in range(3)]
             glimpses = take_glimpses(image, locations[-1], sizes)
+            tf.image_summary("glimpse(t=%d)" % t, glimpses[0], max_images=3)
             glimpse = tf.concat(3, glimpses)
 
             g = glimpse_net([glimpse, locations[-1]])
@@ -134,10 +134,10 @@ def run(args):
                 y_preds[t] = tf.argmax(tf.nn.softmax(logits), 1)
 
                 cumulative = 0.
-                if (t - args.N) >= 0:
+                if t >= args.N:
                     cumulative = rewards[t-args.N]
                 reward = tf.cast(tf.equal(y_preds[t], tf.argmax(label_t, 1)), tf.float32)
-                rewards[t-(args.N-1):t+1] = [cumulative + tf.stop_gradient(tf.expand_dims(reward, 1))] * args.N
+                rewards[t-(args.N-1):t+1] = [cumulative + tf.expand_dims(reward, 1)] * args.N
                 loss += tf.reduce_mean(
                     tf.nn.softmax_cross_entropy_with_logits(logits, label_t))
                 accuracy += tf.reduce_mean(reward) / args.S
@@ -148,17 +148,19 @@ def run(args):
     for t in range(num_time_steps):  # t = 0..T-1
         p = 1 / tf.sqrt(2 * np.pi * tf.square(location_sigma))
         p *= tf.exp(-tf.square(locations[t] - location_means[t]) / (2 * tf.square(location_sigma)))
-        R = rewards[t]
+        R = tf.stop_gradient(rewards[t])
         b = baselines[t]
         b_ = tf.stop_gradient(b)
         reinforce_loss -= args.alpha * (R - b_) * tf.log(p)
-        baseline_loss += tf.reduce_mean(tf.squared_difference(R, b))
+        baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), b))
 
     reinforce_loss = tf.reduce_sum(tf.reduce_mean(reinforce_loss, reduction_indices=0))
-    total_loss = tf.reduce_mean(loss + reinforce_loss + baseline_loss)
+    total_loss = tf.reduce_sum(loss + reinforce_loss + baseline_loss)
     tf.scalar_summary("loss:total", total_loss)
+    tf.scalar_summary("loss:xentropy", loss)
     tf.scalar_summary("loss:reinforcement", reinforce_loss)
     tf.scalar_summary("loss:baseline", baseline_loss)
+    tf.scalar_summary("accuracy", accuracy)
 
     optimizer = args.optimizer
     tvars = tf.trainable_variables()
