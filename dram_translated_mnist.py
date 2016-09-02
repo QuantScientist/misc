@@ -100,62 +100,60 @@ def run(args):
 
     y_preds = [None] * num_time_steps
 
-    locations = []
-    location_means = []
-    location_means += [emission_net(state[1].h)]
-    locations += [tf.random_normal((batch_size, 2), location_means[-1], location_sigma)]
+    location_means = [emission_net(state[1].h)]
+    locations = [tf.random_normal((batch_size, 2), location_means[-1], location_sigma)]
 
-    rewards = [None] * num_time_steps
+    rewards = []
     baselines = []
     loss = 0.
     accuracy = 0.
-    target_idx = 0
+
+    glimpse_sizes = [(glimpse_size[0] * (i + 1), glimpse_size[1] * (i + 1))
+                     for i in range(3)]
     with tf.variable_scope("RNN") as scope:
         for t in range(num_time_steps):
             if t > 0:
                 scope.reuse_variables()
-            baselines += [baseline_net(tf.stop_gradient(state[1].h))]
+            baselines.append(baseline_net(tf.stop_gradient(state[1].h)))
 
-            sizes = [(glimpse_size[0] * (i + 1), glimpse_size[1] * (i + 1))
-                     for i in range(3)]
-            glimpses = take_glimpses(image, locations[-1], sizes)
+            glimpses = take_glimpses(image, locations[-1], glimpse_sizes)
             tf.image_summary("glimpse(t=%d)" % t, glimpses[0], max_images=3)
             glimpse = tf.concat(3, glimpses)
 
             g = glimpse_net([glimpse, locations[-1]])
             output, state = cell(g, state)
 
-            location_means += [emission_net(state[1].h)]
-            locations += [tf.random_normal((batch_size, 2), mean=location_means[-1], stddev=location_sigma)]
+            location_means.append(emission_net(state[1].h))
+            locations.append(tf.random_normal((batch_size, 2), mean=location_means[-1], stddev=location_sigma))
 
             if (t + 1) % args.N == 0:
+                target_idx = t // args.N
                 logits = classification_net(state[0].h)
                 label_t = tf.cast(label[:, target_idx, :], tf.float32)
                 y_preds[t] = tf.argmax(tf.nn.softmax(logits), 1)
 
                 cumulative = 0.
-                if t >= args.N:
+                if len(rewards) > 0:
                     cumulative = rewards[t-args.N]
                 reward = tf.cast(tf.equal(y_preds[t], tf.argmax(label_t, 1)), tf.float32)
-                rewards[t-(args.N-1):t+1] = [cumulative + tf.expand_dims(reward, 1)] * args.N
+                rewards.append(cumulative + tf.expand_dims(reward, 1))
                 loss += tf.reduce_mean(
                     tf.nn.softmax_cross_entropy_with_logits(logits, label_t))
                 accuracy += tf.reduce_mean(reward) / args.S
-                target_idx += 1
 
     reinforce_loss = 0.
     baseline_loss = 0.
     for t in range(num_time_steps):  # t = 0..T-1
         p = 1 / tf.sqrt(2 * np.pi * tf.square(location_sigma))
         p *= tf.exp(-tf.square(locations[t] - location_means[t]) / (2 * tf.square(location_sigma)))
-        R = tf.stop_gradient(rewards[t])
+        R = tf.stop_gradient(rewards[t // args.N])
         b = baselines[t]
         b_ = tf.stop_gradient(b)
         reinforce_loss -= args.alpha * (R - b_) * tf.log(p)
         baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), b))
 
     reinforce_loss = tf.reduce_sum(tf.reduce_mean(reinforce_loss, reduction_indices=0))
-    total_loss = tf.reduce_sum(loss + reinforce_loss + baseline_loss)
+    total_loss = loss + reinforce_loss + baseline_loss
     tf.scalar_summary("loss:total", total_loss)
     tf.scalar_summary("loss:xentropy", loss)
     tf.scalar_summary("loss:reinforcement", reinforce_loss)
@@ -192,9 +190,9 @@ def run(args):
                                                      feed_dict={image: batch_x, label: batch_y,
                                                      K.learning_phase(): 1})
 
-            epoch_loss += [loss]
-            epoch_reinforce_loss += [r_loss]
-            epoch_acc += [acc]
+            epoch_loss.append(loss)
+            epoch_reinforce_loss.append(r_loss)
+            epoch_acc.append(acc)
 
             summary_writer.add_summary(summary, global_step)
             global_step += 1
@@ -214,9 +212,9 @@ def run(args):
                                               K.learning_phase(): 0})
                     acc, loss, r_loss = res[:3]
                     locs = res[3:]
-                    val_loss += [loss]
-                    val_reinforce_loss += [r_loss]
-                    val_acc += [acc]
+                    val_loss.append(loss)
+                    val_reinforce_loss.append(r_loss)
+                    val_acc.append(acc)
 
                     images = batch_x.reshape((-1, image_rows, image_cols))
                     locs = np.asarray(locs, dtype=np.float32)
