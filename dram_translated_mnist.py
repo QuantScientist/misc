@@ -149,7 +149,10 @@ def run(args):
         R = tf.stop_gradient(rewards[t // args.N])
         b = baselines[t]
         b_ = tf.stop_gradient(b)
-        reinforce_loss -= args.alpha * (R - b_) * tf.log(p)
+        log_p = tf.log(p)
+        tf.histogram_summary("p(t=%d)" % t, p)
+        tf.histogram_summary("log_p(t=%d)" % t, log_p)
+        reinforce_loss -= args.alpha * (R - b_) * log_p
         baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), b))
 
     reinforce_loss = tf.reduce_sum(tf.reduce_mean(reinforce_loss, reduction_indices=0))
