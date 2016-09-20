@@ -94,7 +94,7 @@ def run(args):
     classification_net = Dense(num_classes, name="classification_net")
     baseline_net = Dense(1, name="baseline_net")
 
-    image_coarse = tf.image.resize_images(image, glimpse_size[0], glimpse_size[1])
+    image_coarse = tf.image.resize_images(image, glimpse_size)
     state2 = tf.nn.rnn_cell.LSTMStateTuple(c=state[1].c, h=context_net(image_coarse))
     state = (state[0], state2)
 

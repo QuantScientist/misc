@@ -18,7 +18,7 @@ def take_glimpses(image, location, sizes):
     for size in sizes:
         glimpse = tf.image.extract_glimpse(image, size=size, offsets=location,
                                            normalized=True, centered=True)
-        glimpses += [tf.image.resize_images(glimpse, resize[0], resize[1])]
+        glimpses += [tf.image.resize_images(glimpse, resize)]
 
     return glimpses
 
