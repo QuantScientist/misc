@@ -116,7 +116,7 @@ def run(args):
                 scope.reuse_variables()
             baselines.append(baseline_net(tf.stop_gradient(state[1].h)))
 
-            glimpses = take_glimpses(image, locations[-1], glimpse_sizes)
+            glimpses = take_glimpses(image, locations[-1] / args.ratio, glimpse_sizes)
             tf.image_summary("glimpse(t=%d)" % t, glimpses[0], max_images=3)
             glimpse = tf.concat(3, glimpses)
 
@@ -222,7 +222,7 @@ def run(args):
                     images = batch_x.reshape((-1, image_rows, image_cols))
                     locs = np.asarray(locs, dtype=np.float32)
                     locs = (locs + 1) * (image_rows / 2)
-                    plot_glimpse(images, locs, name=args.logdir + "/glimpse.png")
+                    plot_glimpse(images, locs / args.ratio, name=args.logdir + "/glimpse.png")
 
                 print("[Epoch %d/%d]" % (current_epoch + 1, num_epochs))
                 print("loss:", np.asarray(epoch_loss).mean())
@@ -262,6 +262,7 @@ if __name__ == "__main__":
     parser.add_argument("--alpha", dest="alpha", type=float, default=1.)
     parser.add_argument("--baseline", dest="baseline", action="store_true", default=False)
     parser.add_argument("--glimpse_size", dest="glimpse_size", default="8x8")
+    parser.add_argument("--ratio", dest="ratio", type=float, default=1.)
     args = parser.parse_args()
 
     args.image_size = [int(v) for v in args.image_size.split("x")]
