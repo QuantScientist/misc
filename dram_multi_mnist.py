@@ -63,6 +63,21 @@ def build_emission_net(num_lstm_units):
     return emission_net
 
 
+def get_multi_mnist_batch(dataset, batch_size, S, image_size):
+    batch_xs = []
+    batch_ys = []
+    for i in range(S):
+        batch_x, batch_y = dataset.next_batch(batch_size)
+        batch_x = batch_x.reshape((-1, 28, 28, 1))
+        batch_x = translate(batch_x, size=(image_size[0], image_size[1] // S))
+        batch_xs.append(batch_x)
+        batch_ys.append(batch_y)
+
+    batch_x = np.concatenate(batch_xs, axis=2)
+    batch_y = np.concatenate([b[:, None, :] for b in batch_ys], axis=1)
+    return batch_x, batch_y
+
+
 def run(args):
     num_epochs = args.num_epochs
     num_time_steps = args.N * args.S
@@ -108,16 +123,20 @@ def run(args):
     loss = 0.
     accuracy = 0.
 
+    mislabeled = []
+
     glimpse_sizes = [(glimpse_size[0] * (i + 1), glimpse_size[1] * (i + 1))
                      for i in range(3)]
     with tf.variable_scope("RNN") as scope:
         for t in range(num_time_steps):
             if t > 0:
                 scope.reuse_variables()
+            target_idx = t // args.N
             baselines.append(baseline_net(tf.stop_gradient(state[1].h)))
 
             glimpses = take_glimpses(image, locations[-1] / args.ratio, glimpse_sizes)
-            tf.image_summary("glimpse(t=%d)" % t, glimpses[0], max_images=3)
+            tf.image_summary("%d-th obj/glimpse(t=%d)" % (target_idx, t % args.N),
+                             glimpses[0], max_images=3)
             glimpse = tf.concat(3, glimpses)
 
             g = glimpse_net([glimpse, locations[-1]])
@@ -127,19 +146,20 @@ def run(args):
             locations.append(tf.random_normal((batch_size, 2), mean=location_means[-1], stddev=location_sigma))
 
             if (t + 1) % args.N == 0:
-                target_idx = t // args.N
                 logits = classification_net(state[0].h)
                 label_t = tf.cast(label[:, target_idx, :], tf.float32)
                 y_preds[t] = tf.argmax(tf.nn.softmax(logits), 1)
 
                 cumulative = 0.
                 if len(rewards) > 0:
-                    cumulative = rewards[t-args.N]
+                    cumulative = rewards[-1]
                 reward = tf.cast(tf.equal(y_preds[t], tf.argmax(label_t, 1)), tf.float32)
                 rewards.append(cumulative + tf.expand_dims(reward, 1))
-                loss += tf.reduce_mean(
+                xentropy_loss = tf.reduce_mean(
                     tf.nn.softmax_cross_entropy_with_logits(logits, label_t))
                 accuracy += tf.reduce_mean(reward) / args.S
+
+                loss += xentropy_loss
 
     reinforce_loss = 0.
     baseline_loss = 0.
@@ -152,8 +172,9 @@ def run(args):
         log_p = tf.log(p)
         tf.histogram_summary("p(t=%d)" % t, p)
         tf.histogram_summary("log_p(t=%d)" % t, log_p)
-        reinforce_loss -= args.alpha * (R - b_) * log_p
-        baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), b))
+        ignore_loss = tf.logical_not(mislabeled[t])
+        reinforce_loss -= args.alpha * (R - b_) * log_p * ignore_loss
+        baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), b)) * ignore_loss
 
     reinforce_loss = tf.reduce_sum(tf.reduce_mean(reinforce_loss, reduction_indices=0))
     total_loss = loss + reinforce_loss + baseline_loss
@@ -185,9 +206,9 @@ def run(args):
         global_step = 0
         while mnist.train.epochs_completed < num_epochs:
             current_epoch = mnist.train.epochs_completed
-            batch_x, batch_y = mnist.train.next_batch(args.batch_size)
-            batch_x = translate(batch_x.reshape((-1, 28, 28, 1)), size=(image_rows, image_cols))
-            batch_y = batch_y.reshape((-1, args.S, num_classes))
+
+            batch_x, batch_y = get_multi_mnist_batch(mnist.train, batch_size, args.S,
+                                                     (image_rows, image_cols * args.S))
 
             acc, loss, r_loss, summary, _ = sess.run([accuracy, total_loss, reinforce_loss, merged, train_step],
                                                      feed_dict={image: batch_x, label: batch_y,
@@ -206,9 +227,8 @@ def run(args):
                 val_acc = []
 
                 while mnist.validation.epochs_completed != 1:
-                    batch_x, batch_y = mnist.validation.next_batch(batch_size)
-                    batch_x = translate(batch_x.reshape((-1, 28, 28, 1)), size=(image_rows, image_cols))
-                    batch_y = batch_y.reshape((-1, args.S, num_classes))
+                    batch_x, batch_y = get_multi_mnist_batch(mnist.validation, batch_size, args.S,
+                                                             (image_rows, image_cols * args.S))
                     res = sess.run([accuracy, total_loss, reinforce_loss] + locations,
                                    feed_dict={image: batch_x,
                                               label: batch_y,
@@ -278,5 +298,4 @@ if __name__ == "__main__":
     else:
         args.optimizer = tf.train.GradientDescentOptimizer(learning_rate=args.lr)
 
-    assert args.S == 1
     run(args)
