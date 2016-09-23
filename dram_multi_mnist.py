@@ -56,13 +56,6 @@ def build_glimpse_net(output_dim, glimpse_size):
     return glimpse_net
 
 
-def build_emission_net(num_lstm_units):
-    h2 = Input(shape=(num_lstm_units,))
-    l_next = Dense(2, activation="linear")(h2)
-    emission_net = Model(input=h2, output=l_next, name="emission_net")
-    return emission_net
-
-
 def get_multi_mnist_batch(dataset, batch_size, S, image_size):
     batch_xs = []
     batch_ys = []
@@ -93,7 +86,7 @@ def run(args):
     sess = tf.Session()
     K.set_session(sess)
 
-    image = tf.placeholder(tf.float32, (None, image_rows, image_cols, 1))
+    image = tf.placeholder(tf.float32, (None, image_rows, image_cols * args.S, 1))
     label = tf.placeholder(tf.int32, (None, args.S, num_classes))
 
     tf.image_summary("translated", image, max_images=3)
@@ -123,7 +116,7 @@ def run(args):
     loss = 0.
     accuracy = 0.
 
-    mislabeled = []
+    loss_included = []
 
     glimpse_sizes = [(glimpse_size[0] * (i + 1), glimpse_size[1] * (i + 1))
                      for i in range(3)]
@@ -134,8 +127,8 @@ def run(args):
             target_idx = t // args.N
             baselines.append(baseline_net(tf.stop_gradient(state[1].h)))
 
-            glimpses = take_glimpses(image, locations[-1] / args.ratio, glimpse_sizes)
-            tf.image_summary("%d-th obj/glimpse(t=%d)" % (target_idx, t % args.N),
+            glimpses = take_glimpses(image, locations[-1] * args.ratio, glimpse_sizes)
+            tf.image_summary("%d-th obj/glimpse(t=%d)" % (target_idx, t % args.S),
                              glimpses[0], max_images=3)
             glimpse = tf.concat(3, glimpses)
 
@@ -155,11 +148,18 @@ def run(args):
                     cumulative = rewards[-1]
                 reward = tf.cast(tf.equal(y_preds[t], tf.argmax(label_t, 1)), tf.float32)
                 rewards.append(cumulative + tf.expand_dims(reward, 1))
-                xentropy_loss = tf.reduce_mean(
-                    tf.nn.softmax_cross_entropy_with_logits(logits, label_t))
+                xentropy_loss = tf.nn.softmax_cross_entropy_with_logits(logits, label_t)
                 accuracy += tf.reduce_mean(reward) / args.S
 
-                loss += xentropy_loss
+                included = 1
+                reward_value = tf.stop_gradient(tf.expand_dims(reward, 1))
+                if len(loss_included) > 0:
+                    included = loss_included[-1]
+                    loss_included.append(loss_included[-1] * reward_value)  # 0 if mislabels at any time step(<= t)
+                else:
+                    loss_included.append(reward_value)
+
+                loss += tf.reduce_mean(xentropy_loss * included)
 
     reinforce_loss = 0.
     baseline_loss = 0.
@@ -172,12 +172,15 @@ def run(args):
         log_p = tf.log(p)
         tf.histogram_summary("p(t=%d)" % t, p)
         tf.histogram_summary("log_p(t=%d)" % t, log_p)
-        ignore_loss = tf.logical_not(mislabeled[t])
-        reinforce_loss -= args.alpha * (R - b_) * log_p * ignore_loss
-        baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), b)) * ignore_loss
+
+        included = 1
+        if (t + 1) > args.N:
+            included = loss_included[(t // args.N) - 1]
+        reinforce_loss -= (R - b_) * log_p * included
+        baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), b) * included)
 
     reinforce_loss = tf.reduce_sum(tf.reduce_mean(reinforce_loss, reduction_indices=0))
-    total_loss = loss + reinforce_loss + baseline_loss
+    total_loss = loss + args.alpha * reinforce_loss + baseline_loss
     tf.scalar_summary("loss:total", total_loss)
     tf.scalar_summary("loss:xentropy", loss)
     tf.scalar_summary("loss:reinforcement", reinforce_loss)
@@ -198,6 +201,10 @@ def run(args):
     sess.run(tf.initialize_all_variables())
 
     saver = tf.train.Saver()
+    if args.resume:
+        assert os.path.exists(args.checkpoint)
+        saver.restore(sess, args.checkpoint)
+
     if not args.test:
         epoch_loss = []
         epoch_reinforce_loss = []
@@ -239,10 +246,11 @@ def run(args):
                     val_reinforce_loss.append(r_loss)
                     val_acc.append(acc)
 
-                    images = batch_x.reshape((-1, image_rows, image_cols))
-                    locs = np.asarray(locs, dtype=np.float32)
-                    locs = (locs + 1) * (image_rows / 2)
-                    plot_glimpse(images, locs / args.ratio, name=args.logdir + "/glimpse.png")
+                    images = batch_x.reshape((-1, image_rows, image_cols * args.S))
+                    locs = np.asarray(locs, dtype=np.float32) * args.ratio
+                    scale = np.asarray([image_cols / 2, image_rows / 2], dtype=np.float32)
+                    locs = (locs + 1) * scale
+                    plot_glimpse(images, locs, name=args.logdir + "/glimpse.png")
 
                 print("[Epoch %d/%d]" % (current_epoch + 1, num_epochs))
                 print("loss:", np.asarray(epoch_loss).mean())
@@ -259,15 +267,13 @@ def run(args):
 
         saver.save(sess, args.checkpoint)
 
-    if len(args.checkpoint) > 0:
-        saver.restore(sess, args.checkpoint)
-
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--test", dest="test", action="store_true", default=False)
     parser.add_argument("--checkpoint", dest="checkpoint", default="model.ckpt")
+    parser.add_argument("--resume", dest="resume", action="store_true", default=False)
     parser.add_argument("--logdir", dest="logdir", type=str, default="logs")
     parser.add_argument("--num_epochs", dest="num_epochs", type=int, default=1)
     parser.add_argument("--batch_size", dest="batch_size", type=int, default=1)

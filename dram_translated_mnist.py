@@ -56,13 +56,6 @@ def build_glimpse_net(output_dim, glimpse_size):
     return glimpse_net
 
 
-def build_emission_net(num_lstm_units):
-    h2 = Input(shape=(num_lstm_units,))
-    l_next = Dense(2, activation="linear")(h2)
-    emission_net = Model(input=h2, output=l_next, name="emission_net")
-    return emission_net
-
-
 def run(args):
     num_epochs = args.num_epochs
     num_time_steps = args.N * args.S
@@ -177,7 +170,8 @@ def run(args):
     sess.run(tf.initialize_all_variables())
 
     saver = tf.train.Saver()
-    if args.resume and os.path.exists(args.checkpoint):
+    if args.resume:
+        assert os.path.exists(args.checkpoint)
         saver.restore(sess, args.checkpoint)
 
     if not args.test:
