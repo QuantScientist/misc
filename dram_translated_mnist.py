@@ -152,11 +152,11 @@ def run(args):
         log_p = tf.log(p)
         tf.histogram_summary("p(t=%d)" % t, p)
         tf.histogram_summary("log_p(t=%d)" % t, log_p)
-        reinforce_loss -= args.alpha * (R - b_) * log_p
+        reinforce_loss -= (R - b_) * log_p
         baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), b))
 
     reinforce_loss = tf.reduce_sum(tf.reduce_mean(reinforce_loss, reduction_indices=0))
-    total_loss = loss + reinforce_loss + baseline_loss
+    total_loss = loss + args.alpha * reinforce_loss + baseline_loss
     tf.scalar_summary("loss:total", total_loss)
     tf.scalar_summary("loss:xentropy", loss)
     tf.scalar_summary("loss:reinforcement", reinforce_loss)
@@ -177,6 +177,9 @@ def run(args):
     sess.run(tf.initialize_all_variables())
 
     saver = tf.train.Saver()
+    if args.resume and os.path.exists(args.checkpoint):
+        saver.restore(sess, args.checkpoint)
+
     if not args.test:
         epoch_loss = []
         epoch_reinforce_loss = []
@@ -220,9 +223,9 @@ def run(args):
                     val_acc.append(acc)
 
                     images = batch_x.reshape((-1, image_rows, image_cols))
-                    locs = np.asarray(locs, dtype=np.float32)
+                    locs = np.asarray(locs, dtype=np.float32) / args.ratio
                     locs = (locs + 1) * (image_rows / 2)
-                    plot_glimpse(images, locs / args.ratio, name=args.logdir + "/glimpse.png")
+                    plot_glimpse(images, locs, name=args.logdir + "/glimpse.png")
 
                 print("[Epoch %d/%d]" % (current_epoch + 1, num_epochs))
                 print("loss:", np.asarray(epoch_loss).mean())
@@ -239,15 +242,13 @@ def run(args):
 
         saver.save(sess, args.checkpoint)
 
-    if len(args.checkpoint) > 0:
-        saver.restore(sess, args.checkpoint)
-
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--test", dest="test", action="store_true", default=False)
     parser.add_argument("--checkpoint", dest="checkpoint", default="model.ckpt")
+    parser.add_argument("--resume", dest="resume", action="store_true", default=False)
     parser.add_argument("--logdir", dest="logdir", type=str, default="logs")
     parser.add_argument("--num_epochs", dest="num_epochs", type=int, default=1)
     parser.add_argument("--batch_size", dest="batch_size", type=int, default=1)
