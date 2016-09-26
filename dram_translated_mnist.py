@@ -65,6 +65,7 @@ def run(args):
     num_classes = 10
     num_lstm_units = args.num_lstm_units
     location_sigma = args.location_sigma
+    location_max = 1 / args.ratio
 
     mnist = input_data.read_data_sets("data", one_hot=True)
 
@@ -94,7 +95,8 @@ def run(args):
     y_preds = [None] * num_time_steps
 
     location_means = [emission_net(state[1].h)]
-    locations = [tf.random_normal((batch_size, 2), location_means[-1], location_sigma)]
+    locations = [tf.clip_by_value(tf.random_normal((batch_size, 2), location_means[-1], location_sigma),
+                                  -location_max, location_max)]
 
     rewards = []
     baselines = []
@@ -109,7 +111,7 @@ def run(args):
                 scope.reuse_variables()
             baselines.append(baseline_net(tf.stop_gradient(state[1].h)))
 
-            glimpses = take_glimpses(image, locations[-1] / args.ratio, glimpse_sizes)
+            glimpses = take_glimpses(image, locations[-1] * args.ratio, glimpse_sizes)
             tf.image_summary("glimpse(t=%d)" % t, glimpses[0], max_images=3)
             glimpse = tf.concat(3, glimpses)
 
@@ -117,7 +119,8 @@ def run(args):
             output, state = cell(g, state)
 
             location_means.append(emission_net(state[1].h))
-            locations.append(tf.random_normal((batch_size, 2), mean=location_means[-1], stddev=location_sigma))
+            locations.append(tf.clip_by_value(tf.random_normal((batch_size, 2), mean=location_means[-1], stddev=location_sigma),
+                                              -location_max, location_max))
 
             if (t + 1) % args.N == 0:
                 target_idx = t // args.N
@@ -142,11 +145,11 @@ def run(args):
         R = tf.stop_gradient(rewards[t // args.N])
         b = baselines[t]
         b_ = tf.stop_gradient(b)
-        log_p = tf.log(p)
+        log_p = tf.log(p + K.epsilon())
         tf.histogram_summary("p(t=%d)" % t, p)
         tf.histogram_summary("log_p(t=%d)" % t, log_p)
-        reinforce_loss -= (R - b_) * log_p
-        baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), b))
+        reinforce_loss -= (R - tf.reduce_mean(b_)) * log_p
+        baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), tf.reduce_mean(b)))
 
     reinforce_loss = tf.reduce_sum(tf.reduce_mean(reinforce_loss, reduction_indices=0))
     total_loss = loss + args.alpha * reinforce_loss + baseline_loss
@@ -217,7 +220,7 @@ def run(args):
                     val_acc.append(acc)
 
                     images = batch_x.reshape((-1, image_rows, image_cols))
-                    locs = np.asarray(locs, dtype=np.float32) / args.ratio
+                    locs = np.asarray(locs, dtype=np.float32) * args.ratio
                     locs = (locs + 1) * (image_rows / 2)
                     plot_glimpse(images, locs, name=args.logdir + "/glimpse.png")
 
