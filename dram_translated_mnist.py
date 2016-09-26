@@ -148,8 +148,8 @@ def run(args):
         log_p = tf.log(p + K.epsilon())
         tf.histogram_summary("p(t=%d)" % t, p)
         tf.histogram_summary("log_p(t=%d)" % t, log_p)
-        reinforce_loss -= (R - tf.reduce_mean(b_)) * log_p
-        baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), tf.reduce_mean(b)))
+        reinforce_loss -= (R - b_) * log_p
+        baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), b))
 
     reinforce_loss = tf.reduce_sum(tf.reduce_mean(reinforce_loss, reduction_indices=0))
     total_loss = loss + args.alpha * reinforce_loss + baseline_loss
@@ -161,7 +161,6 @@ def run(args):
 
     optimizer = args.optimizer
     tvars = tf.trainable_variables()
-    # grads, _ = tf.clip_by_global_norm(tf.gradients(total_loss, tvars), 5.0)
     grads = tf.gradients(total_loss, tvars)
     for tvar, grad in zip(tvars, grads):
         tf.histogram_summary(tvar.name, grad)
