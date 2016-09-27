@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import os
 import shutil
+import cPickle as pickle
 os.environ["KERAS_BACKEND"] = "tensorflow"
 
 # noinspection PyUnresolvedReferences
@@ -64,13 +65,23 @@ def run(args):
     glimpse_size = [int(s) for s in args.glimpse_size.split("x")]
     num_classes = 10
     num_lstm_units = args.num_lstm_units
-    location_sigma = args.location_sigma
-    location_max = 1 / args.ratio
+    location_sigma = np.float32(args.location_sigma)
+    location_max = np.float32(1 / args.ratio)
 
     mnist = input_data.read_data_sets("data", one_hot=True)
 
     sess = tf.Session()
     K.set_session(sess)
+
+    if str.lower(args.optimizer) == "adam":
+        optimizer = tf.train.AdamOptimizer(learning_rate=args.lr,
+                                           beta1=0.9, beta2=0.999,
+                                           epsilon=args.epsilon)
+    elif str.lower(args.optimizer) == "momentum":
+        optimizer = tf.train.MomentumOptimizer(learning_rate=args.lr,
+                                               momentum=args.momentum)
+    else:
+        optimizer = tf.train.GradientDescentOptimizer(learning_rate=args.lr)
 
     image = tf.placeholder(tf.float32, (None, image_rows, image_cols, 1))
     label = tf.placeholder(tf.int32, (None, args.S, num_classes))
@@ -119,8 +130,9 @@ def run(args):
             output, state = cell(g, state)
 
             location_means.append(emission_net(state[1].h))
-            locations.append(tf.clip_by_value(tf.random_normal((batch_size, 2), mean=location_means[-1], stddev=location_sigma),
-                                              -location_max, location_max))
+            locations.append(
+                tf.clip_by_value(tf.random_normal((batch_size, 2), mean=location_means[-1], stddev=location_sigma),
+                                 -location_max, location_max))
 
             if (t + 1) % args.N == 0:
                 target_idx = t // args.N
@@ -130,7 +142,7 @@ def run(args):
 
                 cumulative = 0.
                 if len(rewards) > 0:
-                    cumulative = rewards[t-args.N]
+                    cumulative = rewards[t - args.N]
                 reward = tf.cast(tf.equal(y_preds[t], tf.argmax(label_t, 1)), tf.float32)
                 rewards.append(cumulative + tf.expand_dims(reward, 1))
                 loss += tf.reduce_mean(
@@ -159,7 +171,6 @@ def run(args):
     tf.scalar_summary("loss:baseline", baseline_loss)
     tf.scalar_summary("accuracy", accuracy)
 
-    optimizer = args.optimizer
     tvars = tf.trainable_variables()
     grads = tf.gradients(total_loss, tvars)
     for tvar, grad in zip(tvars, grads):
@@ -172,9 +183,12 @@ def run(args):
     sess.run(tf.initialize_all_variables())
 
     saver = tf.train.Saver()
+
     if args.resume:
         assert os.path.exists(args.checkpoint)
         saver.restore(sess, args.checkpoint)
+
+    best_val_score = 0.
 
     if not args.test:
         epoch_loss = []
@@ -189,8 +203,7 @@ def run(args):
             batch_y = batch_y.reshape((-1, args.S, num_classes))
 
             acc, loss, r_loss, summary, _ = sess.run([accuracy, total_loss, reinforce_loss, merged, train_step],
-                                                     feed_dict={image: batch_x, label: batch_y,
-                                                     K.learning_phase(): 1})
+                                                     feed_dict={image: batch_x, label: batch_y})
 
             epoch_loss.append(loss)
             epoch_reinforce_loss.append(r_loss)
@@ -210,8 +223,7 @@ def run(args):
                     batch_y = batch_y.reshape((-1, args.S, num_classes))
                     res = sess.run([accuracy, total_loss, reinforce_loss] + locations,
                                    feed_dict={image: batch_x,
-                                              label: batch_y,
-                                              K.learning_phase(): 0})
+                                              label: batch_y})
                     acc, loss, r_loss = res[:3]
                     locs = res[3:]
                     val_loss.append(loss)
@@ -236,7 +248,13 @@ def run(args):
                 mnist.validation._epochs_completed = 0
                 mnist.validation._index_in_epoch = 0
 
+                val_score = np.asarray(val_acc).mean()
+                if val_score < 0.2:
+                    return val_score
+                best_val_score = max(val_score, best_val_score)
+
         saver.save(sess, args.checkpoint)
+        return best_val_score
 
 
 if __name__ == "__main__":
@@ -260,6 +278,7 @@ if __name__ == "__main__":
     parser.add_argument("--baseline", dest="baseline", action="store_true", default=False)
     parser.add_argument("--glimpse_size", dest="glimpse_size", default="8x8")
     parser.add_argument("--ratio", dest="ratio", type=float, default=1.)
+    parser.add_argument("--resume-bo", dest="resume_bo", action="store_true", default=False)
     args = parser.parse_args()
 
     args.image_size = [int(v) for v in args.image_size.split("x")]
@@ -267,13 +286,57 @@ if __name__ == "__main__":
     if os.path.exists(args.logdir):
         shutil.rmtree(args.logdir)
 
-    if str.lower(args.optimizer) == "adam":
-        args.optimizer = tf.train.AdamOptimizer(learning_rate=args.lr)
-    elif str.lower(args.optimizer) == "momentum":
-        args.optimizer = tf.train.MomentumOptimizer(learning_rate=args.lr,
-                                                    momentum=args.momentum)
-    else:
-        args.optimizer = tf.train.GradientDescentOptimizer(learning_rate=args.lr)
-
     assert args.S == 1
-    run(args)
+
+    def dram(location_sigma, lr, alpha, ratio, adam_epsilon):
+        args.location_sigma = location_sigma
+        args.lr = lr
+        args.alpha = alpha
+        args.ratio = ratio
+        args.epsilon = adam_epsilon
+        score = run(args)
+        tf.reset_default_graph()
+        return score
+
+    from bayes_opt import BayesianOptimization
+
+    if args.resume_bo:
+        dramBO = pickle.load(open("dramBO.pkl", "rb"))
+    else:
+        dramBO = BayesianOptimization(dram, {
+            "location_sigma": (1.0, 0.01),
+            "lr": (0.1, 1e-8),
+            "alpha": (1.0, 1e-10),
+            "ratio": (1.0, 0.1),
+            "adam_epsilon": (1e-7, 1e-12)
+        }, verbose=1)
+
+    dramBO.explore({
+        "location_sigma": (0.3, 0.1),
+        "lr": (0.003, 0.001),
+        "alpha": (1e-7, 9e-8),
+        "ratio": (0.3, 0.2),
+        "adam_epsilon": (1e-8, 9e-9)
+    })
+
+    dramBO.maximize(init_points=3, n_iter=50, acq="ucb", kappa=2.576, xi=0.0)
+    dramBO.maximize(init_points=3, n_iter=50, acq="poi", kappa=2.576, xi=0.0)
+    dramBO.maximize(init_points=3, n_iter=50, acq="ei", kappa=2.576, xi=0.0)
+
+    dramBO.explore({
+        "location_sigma": (0.5, 0.01),
+        "lr": (0.03, 3e-5),
+        "alpha": (1.0, 1e-8),
+        "ratio": (1.0, 0.1),
+        "adam_epsilon": (1e-8, 1e-12)
+    })
+
+    dramBO.maximize(init_points=3, n_iter=10, acq="ucb", kappa=2.576, xi=0.0)
+    dramBO.maximize(init_points=3, n_iter=10, acq="poi", kappa=2.576, xi=0.0)
+    dramBO.maximize(init_points=3, n_iter=10, acq="ei", kappa=2.576, xi=0.0)
+
+    print(dramBO.res["max"])
+    print(dramBO.res["all"])
+
+    with open("dramBO.pkl", "wb") as f:
+        pickle.dump(dramBO, f)
