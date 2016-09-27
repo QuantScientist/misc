@@ -3,6 +3,7 @@ from __future__ import division
 from __future__ import print_function
 
 from six.moves import range
+from six import u
 
 from PIL import Image
 from PIL import ImageFont
@@ -19,8 +20,7 @@ def get_chars(char_filepath):
     chars = []
     with open(char_filepath, "r") as f:
         for line in f:
-            c = line.rstrip()
-            assert len(c) == 1
+            c = line.rstrip().decode("utf-8")
             chars.append(c)
     return chars
 
@@ -74,10 +74,11 @@ def run(args):
     chars = get_chars(args.char_filepath)
     fonts = [ImageFont.truetype(font_path, size=args.size) for font_path in font_paths]
 
-    c = gen_char(chars[0], fonts[0])
-
-    plt.imshow(c, cmap=plt.get_cmap("gray"))
-    plt.savefig("char.png")
+    for c in chars:
+        im = gen_char(c, fonts[0])
+        print(im.shape)
+        plt.imshow(im, cmap=plt.get_cmap("gray"))
+        plt.savefig("%s.png" % c)
 
 
 if __name__ == "__main__":
