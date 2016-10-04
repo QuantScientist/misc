@@ -80,6 +80,8 @@ def run(args):
     num_classes = 10
     num_lstm_units = args.num_lstm_units
     location_sigma = args.location_sigma
+    ratio = [args.ratio, 1.0]
+    location_bound = 1.0 / args.ratio
 
     mnist = input_data.read_data_sets("data", one_hot=True)
 
@@ -109,12 +111,13 @@ def run(args):
     y_preds = [None] * num_time_steps
 
     location_means = [emission_net(state[1].h)]
-    locations = [tf.random_normal((batch_size, 2), location_means[-1], location_sigma)]
+    locations = [tf.clip_by_value(tf.random_normal((batch_size, 2), location_means[-1], location_sigma),
+                                  location_bound * -1., location_bound)]
 
     rewards = []
     baselines = []
     loss = 0.
-    accuracy = 0.
+    accuracy = 1.
 
     loss_included = []
 
@@ -127,7 +130,7 @@ def run(args):
             target_idx = t // args.N
             baselines.append(baseline_net(tf.stop_gradient(state[1].h)))
 
-            glimpses = take_glimpses(image, locations[-1] * args.ratio, glimpse_sizes)
+            glimpses = take_glimpses(image, locations[-1] * ratio, glimpse_sizes)
             tf.image_summary("%d-th obj/glimpse(t=%d)" % (target_idx, t % args.S),
                              glimpses[0], max_images=3)
             glimpse = tf.concat(3, glimpses)
@@ -136,7 +139,8 @@ def run(args):
             output, state = cell(g, state)
 
             location_means.append(emission_net(state[1].h))
-            locations.append(tf.random_normal((batch_size, 2), mean=location_means[-1], stddev=location_sigma))
+            locations.append(tf.clip_by_value(tf.random_normal((batch_size, 2), mean=location_means[-1], stddev=location_sigma),
+                                              location_bound * -1., location_bound))
 
             if (t + 1) % args.N == 0:
                 logits = classification_net(state[0].h)
@@ -149,7 +153,9 @@ def run(args):
                 reward = tf.cast(tf.equal(y_preds[t], tf.argmax(label_t, 1)), tf.float32)
                 rewards.append(cumulative + tf.expand_dims(reward, 1))
                 xentropy_loss = tf.nn.softmax_cross_entropy_with_logits(logits, label_t)
-                accuracy += tf.reduce_mean(reward) / args.S
+
+                tf.scalar_summary("accuracy(t=%d)" % t, tf.reduce_mean(reward))
+                accuracy *= reward
 
                 included = 1
                 reward_value = tf.stop_gradient(tf.expand_dims(reward, 1))
@@ -169,7 +175,7 @@ def run(args):
         R = tf.stop_gradient(rewards[t // args.N])
         b = baselines[t]
         b_ = tf.stop_gradient(b)
-        log_p = tf.log(p)
+        log_p = tf.log(p + K.epsilon())
         tf.histogram_summary("p(t=%d)" % t, p)
         tf.histogram_summary("log_p(t=%d)" % t, log_p)
 
@@ -185,11 +191,10 @@ def run(args):
     tf.scalar_summary("loss:xentropy", loss)
     tf.scalar_summary("loss:reinforcement", reinforce_loss)
     tf.scalar_summary("loss:baseline", baseline_loss)
-    tf.scalar_summary("accuracy", accuracy)
+    tf.scalar_summary("accuracy", tf.reduce_mean(accuracy))
 
     optimizer = args.optimizer
     tvars = tf.trainable_variables()
-    # grads, _ = tf.clip_by_global_norm(tf.gradients(total_loss, tvars), 5.0)
     grads = tf.gradients(total_loss, tvars)
     for tvar, grad in zip(tvars, grads):
         tf.histogram_summary(tvar.name, grad)
@@ -247,8 +252,8 @@ def run(args):
                     val_acc.append(acc)
 
                     images = batch_x.reshape((-1, image_rows, image_cols * args.S))
-                    locs = np.asarray(locs, dtype=np.float32) * args.ratio
-                    scale = np.asarray([image_cols / 2, image_rows / 2], dtype=np.float32)
+                    locs = np.asarray(locs, dtype=np.float32) * ratio
+                    scale = np.asarray([image_cols * args.S / 2, image_rows / 2], dtype=np.float32)
                     locs = (locs + 1) * scale
                     plot_glimpse(images, locs, name=args.logdir + "/glimpse.png")
 
