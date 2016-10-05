@@ -103,6 +103,7 @@ def run(args):
     emission_net = Dense(2, name="emission_net")
     classification_net = Dense(num_classes, name="classification_net")
     baseline_net = Dense(1, name="baseline_net")
+    std_net = Dense(1, name="std_net")
 
     image_coarse = tf.image.resize_images(image, glimpse_size)
     state2 = tf.nn.rnn_cell.LSTMStateTuple(c=state[1].c, h=context_net(image_coarse))
@@ -117,6 +118,7 @@ def run(args):
     rewards = []
     cumulative_rewards = []
     baselines = []
+    stds = []
     loss = 0.
     accuracy = 1.
 
@@ -129,7 +131,10 @@ def run(args):
             if t > 0:
                 scope.reuse_variables()
             target_idx = t // args.N
-            baselines.append(baseline_net(tf.stop_gradient(state[1].h)))
+
+            h_state = tf.stop_gradient(state[1].h)
+            baselines.append(baseline_net(h_state))
+            stds.append(std_net(h_state))
 
             glimpses = take_glimpses(image, locations[-1] * ratio, glimpse_sizes)
             tf.image_summary("%d-th obj/glimpse(t=%d)" % (target_idx, t % args.S),
@@ -171,6 +176,7 @@ def run(args):
 
     reinforce_loss = 0.
     baseline_loss = 0.
+    std_loss = 0.
     for t in range(num_time_steps):  # t = 0..T-1
         p = 1 / tf.sqrt(2 * np.pi * tf.square(location_sigma))
         p *= tf.exp(-tf.square(locations[t] - location_means[t]) / (2 * tf.square(location_sigma)))
@@ -178,6 +184,7 @@ def run(args):
         Rs = tf.stop_gradient(cumulative_rewards[t // args.N])
         b = baselines[t]
         b_ = tf.stop_gradient(b)
+        std = stds[t]
 
         tf.scalar_summary("R(t=%d)" % t, tf.reduce_mean(R))
         tf.scalar_summary("Rs(t=%d)" % t, tf.reduce_mean(Rs))
@@ -186,18 +193,22 @@ def run(args):
         log_p = tf.log(p + K.epsilon())
         tf.histogram_summary("p(t=%d)" % t, p)
 
+        std_value = tf.sqrt(tf.nn.moments(log_p, axes=[0])[1])
+
         included = 1
         if (t + 1) > args.N:
             included = loss_included[(t // args.N) - 1]
-        reinforce_loss -= (Rs - b_) * log_p * included
+        reinforce_loss -= (Rs - b_) * log_p * included / tf.stop_gradient(tf.maximum(std, 1.))
         baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), b) * included)
+        std_loss += tf.reduce_mean(tf.squared_difference(std_value, std) * included)
 
     reinforce_loss = tf.reduce_sum(tf.reduce_mean(reinforce_loss, reduction_indices=0))
-    total_loss = loss + args.alpha * reinforce_loss + baseline_loss
+    total_loss = loss + args.alpha * reinforce_loss + baseline_loss + std_loss
     tf.scalar_summary("loss:total", total_loss)
     tf.scalar_summary("loss:xentropy", loss)
     tf.scalar_summary("loss:reinforcement", reinforce_loss)
     tf.scalar_summary("loss:baseline", baseline_loss)
+    tf.scalar_summary("loss:std", std_loss)
     tf.scalar_summary("accuracy", tf.reduce_mean(accuracy))
 
     optimizer = args.optimizer
@@ -220,6 +231,7 @@ def run(args):
     if not args.test:
         epoch_loss = []
         epoch_reinforce_loss = []
+        epoch_std_loss = []
         epoch_acc = []
 
         global_step = 0
@@ -229,13 +241,14 @@ def run(args):
             batch_x, batch_y = get_multi_mnist_batch(mnist.train, batch_size, args.S,
                                                      (image_rows, image_cols * args.S))
 
-            acc, loss, r_loss, summary, _ = sess.run([accuracy, total_loss, reinforce_loss, merged, train_step],
-                                                     feed_dict={image: batch_x, label: batch_y,
-                                                     K.learning_phase(): 1})
+            acc, loss, r_loss, sigma_loss, summary, _ = sess.run(
+                [accuracy, total_loss, reinforce_loss, std_loss, merged, train_step],
+                feed_dict={image: batch_x, label: batch_y, K.learning_phase(): 1})
 
             epoch_loss.append(loss)
             epoch_reinforce_loss.append(r_loss)
             epoch_acc.append(acc)
+            epoch_std_loss.append(sigma_loss)
 
             summary_writer.add_summary(summary, global_step)
             global_step += 1
@@ -243,19 +256,21 @@ def run(args):
             if mnist.train.epochs_completed != current_epoch:
                 val_loss = []
                 val_reinforce_loss = []
+                val_std_loss = []
                 val_acc = []
 
                 while mnist.validation.epochs_completed != 1:
                     batch_x, batch_y = get_multi_mnist_batch(mnist.validation, batch_size, args.S,
                                                              (image_rows, image_cols * args.S))
-                    res = sess.run([accuracy, total_loss, reinforce_loss] + locations,
+                    res = sess.run([accuracy, total_loss, reinforce_loss, std_loss] + locations,
                                    feed_dict={image: batch_x,
                                               label: batch_y,
                                               K.learning_phase(): 0})
-                    acc, loss, r_loss = res[:3]
-                    locs = res[3:]
+                    acc, loss, r_loss, sigma_loss = res[:4]
+                    locs = res[4:]
                     val_loss.append(loss)
                     val_reinforce_loss.append(r_loss)
+                    val_std_loss.append(sigma_loss)
                     val_acc.append(acc)
 
                     images = batch_x.reshape((-1, image_rows, image_cols * args.S))
@@ -269,10 +284,12 @@ def run(args):
                 print("reinforce_loss: %.5f+/-%.5f" % (
                     np.asarray(epoch_reinforce_loss).mean(),
                     np.asarray(epoch_reinforce_loss).std()))
+                print("std_loss:", np.asarray(epoch_std_loss).mean())
                 print("accuracy:", np.asarray(epoch_acc).mean())
 
                 print("val_loss:", np.asarray(val_loss).mean())
                 print("val_reinforce_loss:", np.asarray(val_reinforce_loss).mean())
+                print("val_std_loss:", np.asarray(val_std_loss).mean())
                 print("val_acc:", np.asarray(val_acc).mean())
                 mnist.validation._epochs_completed = 0
                 mnist.validation._index_in_epoch = 0
