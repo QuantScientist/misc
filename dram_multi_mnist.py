@@ -33,8 +33,8 @@ def build_context_net(output_dim, glimpse_size):
     z = Convolution2D(64, 3, 3, activation="relu", dim_ordering="tf")(z)
     z = Convolution2D(128, 3, 3, activation="relu", dim_ordering="tf")(z)
     z = Flatten()(z)
-    z = Dense(output_dim, activation="relu")(z)
-    context_net = Model(input=I_coarse, output=z, name="context_net")
+    z = Dense(output_dim, activation="relu", name="context/output")(z)
+    context_net = Model(input=I_coarse, output=z)
     return context_net
 
 
@@ -46,13 +46,13 @@ def build_glimpse_net(output_dim, glimpse_size):
     g_x = Convolution2D(64, 3, 3, activation="relu", dim_ordering="tf")(g_x)
     g_x = Convolution2D(128, 3, 3, activation="relu", dim_ordering="tf")(g_x)
     g_x = Flatten()(g_x)
-    g_x = Dense(output_dim, activation="relu")(g_x)
+    g_x = Dense(output_dim, activation="relu", name="glimpse/g_x")(g_x)
 
-    g_l = Dense(output_dim, activation="relu")(l)
+    g_l = Dense(output_dim, activation="relu", name="glimpse/g_l")(l)
 
     g = Lambda(lambda tensors: tf.mul(tensors[0], tensors[1]),
                output_shape=(output_dim,))([g_x, g_l])
-    glimpse_net = Model(input=[x, l], output=g, name="glimpse_net")
+    glimpse_net = Model(input=[x, l], output=g)
     return glimpse_net
 
 
@@ -115,6 +115,7 @@ def run(args):
                                   location_bound * -1., location_bound)]
 
     rewards = []
+    cumulative_rewards = []
     baselines = []
     loss = 0.
     accuracy = 1.
@@ -151,7 +152,8 @@ def run(args):
                 if len(rewards) > 0:
                     cumulative = rewards[-1]
                 reward = tf.cast(tf.equal(y_preds[t], tf.argmax(label_t, 1)), tf.float32)
-                rewards.append(cumulative + tf.expand_dims(reward, 1))
+                rewards.append(tf.expand_dims(reward, 1))
+                cumulative_rewards.append(cumulative + tf.expand_dims(reward, 1))
                 xentropy_loss = tf.nn.softmax_cross_entropy_with_logits(logits, label_t)
 
                 tf.scalar_summary("accuracy(t=%d)" % t, tf.reduce_mean(reward))
@@ -173,16 +175,21 @@ def run(args):
         p = 1 / tf.sqrt(2 * np.pi * tf.square(location_sigma))
         p *= tf.exp(-tf.square(locations[t] - location_means[t]) / (2 * tf.square(location_sigma)))
         R = tf.stop_gradient(rewards[t // args.N])
+        Rs = tf.stop_gradient(cumulative_rewards[t // args.N])
         b = baselines[t]
         b_ = tf.stop_gradient(b)
+
+        tf.scalar_summary("R(t=%d)" % t, tf.reduce_mean(R))
+        tf.scalar_summary("Rs(t=%d)" % t, tf.reduce_mean(Rs))
+        tf.histogram_summary("b(t=%d)" % t, b_)
+
         log_p = tf.log(p + K.epsilon())
         tf.histogram_summary("p(t=%d)" % t, p)
-        tf.histogram_summary("log_p(t=%d)" % t, log_p)
 
         included = 1
         if (t + 1) > args.N:
             included = loss_included[(t // args.N) - 1]
-        reinforce_loss -= (R - b_) * log_p * included
+        reinforce_loss -= (Rs - b_) * log_p * included
         baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), b) * included)
 
     reinforce_loss = tf.reduce_sum(tf.reduce_mean(reinforce_loss, reduction_indices=0))
@@ -303,6 +310,10 @@ if __name__ == "__main__":
 
     if str.lower(args.optimizer) == "adam":
         args.optimizer = tf.train.AdamOptimizer(learning_rate=args.lr)
+    elif str.lower(args.optimizer) == "rmsprop":
+        args.optimizer = tf.train.RMSPropOptimizer(learning_rate=args.lr, decay=0.9,
+                                                   momentum=args.momentum,
+                                                   epsilon=1e-10)
     elif str.lower(args.optimizer) == "momentum":
         args.optimizer = tf.train.MomentumOptimizer(learning_rate=args.lr,
                                                     momentum=args.momentum)
