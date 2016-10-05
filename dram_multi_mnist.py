@@ -297,6 +297,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", dest="lr", type=float, default=1e-3)
     parser.add_argument("--optimizer", dest="optimizer", default="adam")
     parser.add_argument("--momentum", dest="momentum", default=0.9, type=float)
+    parser.add_argument("--adam_epsilon", dest="epsilon", default=1e-8, type=float)
     parser.add_argument("--alpha", dest="alpha", type=float, default=1.)
     parser.add_argument("--baseline", dest="baseline", action="store_true", default=False)
     parser.add_argument("--glimpse_size", dest="glimpse_size", default="8x8")
@@ -309,7 +310,7 @@ if __name__ == "__main__":
         shutil.rmtree(args.logdir)
 
     if str.lower(args.optimizer) == "adam":
-        args.optimizer = tf.train.AdamOptimizer(learning_rate=args.lr)
+        args.optimizer = tf.train.AdamOptimizer(learning_rate=args.lr, epsilon=args.epsilon)
     elif str.lower(args.optimizer) == "rmsprop":
         args.optimizer = tf.train.RMSPropOptimizer(learning_rate=args.lr, decay=0.9,
                                                    momentum=args.momentum,
