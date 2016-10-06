@@ -56,7 +56,7 @@ def build_glimpse_net(output_dim, glimpse_size):
     return glimpse_net
 
 
-def get_multi_mnist_batch(dataset, batch_size, S, image_size):
+def get_multi_mnist_batch(dataset, batch_size, S, image_size, eos=False):
     batch_xs = []
     batch_ys = []
     for i in range(S):
@@ -68,6 +68,10 @@ def get_multi_mnist_batch(dataset, batch_size, S, image_size):
 
     batch_x = np.concatenate(batch_xs, axis=2)
     batch_y = np.concatenate([b[:, None, :] for b in batch_ys], axis=1)
+
+    if eos:
+        eos_label = np.repeat([11], batch_size).reshape((batch_size, 1))
+        batch_x = np.concatenate([batch_x, eos_label])
     return batch_x, batch_y
 
 
@@ -81,7 +85,7 @@ def run(args):
     num_lstm_units = args.num_lstm_units
     location_sigma = args.location_sigma
     ratio = [args.ratio, 1.0]
-    location_bound = 1.0 / args.ratio
+    location_bound = [1.0 / args.ratio, 1.0]
 
     mnist = input_data.read_data_sets("data", one_hot=True)
 
@@ -100,7 +104,8 @@ def run(args):
 
     context_net = build_context_net(num_lstm_units, glimpse_size)
     glimpse_net = build_glimpse_net(num_lstm_units, glimpse_size)
-    emission_net = Dense(2, name="emission_net")
+    emission_net_x = Dense(1, name="emission_net_x")
+    emission_net_y = Dense(1, name="emission_net_y")
     classification_net = Dense(num_classes, name="classification_net")
     baseline_net = Dense(1, name="baseline_net")
     std_net = Dense(1, name="std_net")
@@ -111,9 +116,12 @@ def run(args):
 
     y_preds = [None] * num_time_steps
 
-    location_means = [emission_net(state[1].h)]
-    locations = [tf.clip_by_value(tf.random_normal((batch_size, 2), location_means[-1], location_sigma),
-                                  location_bound * -1., location_bound)]
+    location_means = [(emission_net_x(state[1].h), emission_net_y(state[1].h))]
+    x_location = tf.clip_by_value(tf.random_normal((batch_size, 1), location_means[-1][0], location_sigma),
+                                  location_bound[0] * -1, location_bound[0])
+    y_location = tf.clip_by_value(tf.random_normal((batch_size, 1), location_means[-1][1], location_sigma),
+                                  location_bound[1] * -1., location_bound[1])
+    locations = [tf.concat(1, [x_location, y_location])]
 
     rewards = []
     cumulative_rewards = []
@@ -136,17 +144,21 @@ def run(args):
             baselines.append(baseline_net(h_state))
             stds.append(std_net(h_state))
 
-            glimpses = take_glimpses(image, locations[-1] * ratio, glimpse_sizes)
+            location = locations[-1] * ratio
+            glimpses = take_glimpses(image, location, glimpse_sizes)
             tf.image_summary("%d-th obj/glimpse(t=%d)" % (target_idx, t % args.S),
                              glimpses[0], max_images=3)
             glimpse = tf.concat(3, glimpses)
 
-            g = glimpse_net([glimpse, locations[-1]])
+            g = glimpse_net([glimpse, location])
             output, state = cell(g, state)
 
-            location_means.append(emission_net(state[1].h))
-            locations.append(tf.clip_by_value(tf.random_normal((batch_size, 2), mean=location_means[-1], stddev=location_sigma),
-                                              location_bound * -1., location_bound))
+            location_means.append((emission_net_x(state[1].h), emission_net_y(state[1].h)))
+            x_location = tf.clip_by_value(tf.random_normal((batch_size, 1), mean=location_means[-1][0], stddev=location_sigma),
+                                          location_bound[0] * -1, location_bound[0])
+            y_location = tf.clip_by_value(tf.random_normal((batch_size, 1), mean=location_means[-1][1], stddev=location_sigma),
+                                          location_bound[1] * -1, location_bound[1])
+            locations.append(tf.concat(1, [x_location, y_location]))
 
             if (t + 1) % args.N == 0:
                 logits = classification_net(state[0].h)
@@ -179,9 +191,11 @@ def run(args):
     std_loss = 0.
     for t in range(num_time_steps):  # t = 0..T-1
         p = 1 / tf.sqrt(2 * np.pi * tf.square(location_sigma))
-        p *= tf.exp(-tf.square(locations[t] - location_means[t]) / (2 * tf.square(location_sigma)))
+        p *= tf.exp(-tf.square(locations[t] - tf.concat(1, location_means[t])) / (2 * tf.square(location_sigma)))
+
         R = tf.stop_gradient(rewards[t // args.N])
         Rs = tf.stop_gradient(cumulative_rewards[t // args.N])
+
         b = baselines[t]
         b_ = tf.stop_gradient(b)
         std = stds[t]
@@ -191,7 +205,6 @@ def run(args):
         tf.histogram_summary("b(t=%d)" % t, b_)
 
         log_p = tf.log(p + K.epsilon())
-        tf.histogram_summary("p(t=%d)" % t, p)
 
         std_value = tf.sqrt(tf.nn.moments(log_p, axes=[0])[1])
 
@@ -259,6 +272,14 @@ def run(args):
                 val_std_loss = []
                 val_acc = []
 
+                print("[Epoch %d/%d]" % (current_epoch + 1, num_epochs))
+                print("loss:", np.asarray(epoch_loss).mean())
+                print("reinforce_loss: %.5f+/-%.5f" % (
+                    np.asarray(epoch_reinforce_loss).mean(),
+                    np.asarray(epoch_reinforce_loss).std()))
+                print("std_loss:", np.asarray(epoch_std_loss).mean())
+                print("accuracy:", np.asarray(epoch_acc).mean())
+
                 while mnist.validation.epochs_completed != 1:
                     batch_x, batch_y = get_multi_mnist_batch(mnist.validation, batch_size, args.S,
                                                              (image_rows, image_cols * args.S))
@@ -278,14 +299,6 @@ def run(args):
                     scale = np.asarray([image_cols * args.S / 2, image_rows / 2], dtype=np.float32)
                     locs = (locs + 1) * scale
                     plot_glimpse(images, locs, name=args.logdir + "/glimpse.png")
-
-                print("[Epoch %d/%d]" % (current_epoch + 1, num_epochs))
-                print("loss:", np.asarray(epoch_loss).mean())
-                print("reinforce_loss: %.5f+/-%.5f" % (
-                    np.asarray(epoch_reinforce_loss).mean(),
-                    np.asarray(epoch_reinforce_loss).std()))
-                print("std_loss:", np.asarray(epoch_std_loss).mean())
-                print("accuracy:", np.asarray(epoch_acc).mean())
 
                 print("val_loss:", np.asarray(val_loss).mean())
                 print("val_reinforce_loss:", np.asarray(val_reinforce_loss).mean())
