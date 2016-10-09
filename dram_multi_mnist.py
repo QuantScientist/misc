@@ -146,7 +146,7 @@ def run(args):
 
             location = locations[-1] * ratio
             glimpses = take_glimpses(image, location, glimpse_sizes)
-            tf.image_summary("%d-th obj/glimpse(t=%d)" % (target_idx, t % args.S),
+            tf.image_summary("%d-th obj/glimpse(t=%d)" % (target_idx, t),
                              glimpses[0], max_images=3)
             glimpse = tf.concat(3, glimpses)
 
