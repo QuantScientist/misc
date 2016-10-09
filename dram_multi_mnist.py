@@ -38,8 +38,8 @@ def build_context_net(output_dim, glimpse_size):
     return context_net
 
 
-def build_glimpse_net(output_dim, glimpse_size):
-    x = Input(shape=(glimpse_size[0], glimpse_size[1], 3))
+def build_glimpse_net(output_dim, glimpse_size, num_patches):
+    x = Input(shape=(glimpse_size[0], glimpse_size[1], num_patches))
     l = Input(shape=(2,))
 
     g_x = Convolution2D(64, 5, 5, activation="relu", dim_ordering="tf")(x)
@@ -98,12 +98,12 @@ def run(args):
     tf.image_summary("translated", image, max_images=3)
 
     # === Recurrent network ===
-    lstm_cell = tf.nn.rnn_cell.LSTMCell(num_lstm_units, forget_bias=1., use_peepholes=True, state_is_tuple=True)
+    lstm_cell = tf.nn.rnn_cell.LSTMCell(num_lstm_units, forget_bias=1., use_peepholes=args.use_peepholes, state_is_tuple=True)
     cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * 2, state_is_tuple=True)
     state = initial_state = cell.zero_state(batch_size, tf.float32)
 
     context_net = build_context_net(num_lstm_units, glimpse_size)
-    glimpse_net = build_glimpse_net(num_lstm_units, glimpse_size)
+    glimpse_net = build_glimpse_net(num_lstm_units * 2, glimpse_size, args.num_patches)
     emission_net_x = Dense(1, name="emission_net_x")
     emission_net_y = Dense(1, name="emission_net_y")
     classification_net = Dense(num_classes, name="classification_net")
@@ -111,8 +111,8 @@ def run(args):
     std_net = Dense(1, name="std_net")
 
     image_coarse = tf.image.resize_images(image, glimpse_size)
-    state2 = tf.nn.rnn_cell.LSTMStateTuple(c=state[1].c, h=context_net(image_coarse))
-    state = (state[0], state2)
+    state1 = tf.nn.rnn_cell.LSTMStateTuple(c=state[1].c, h=context_net(image_coarse))
+    state = (state[0], state1)
 
     y_preds = [None] * num_time_steps
 
@@ -127,13 +127,13 @@ def run(args):
     cumulative_rewards = []
     baselines = []
     stds = []
-    loss = 0.
+    xentropy_losses = []
     accuracy = 1.
 
     loss_included = []
 
     glimpse_sizes = [(glimpse_size[0] * (i + 1), glimpse_size[1] * (i + 1))
-                     for i in range(3)]
+                     for i in range(args.num_patches)]
     with tf.variable_scope("RNN") as scope:
         for t in range(num_time_steps):
             if t > 0:
@@ -171,7 +171,6 @@ def run(args):
                 reward = tf.cast(tf.equal(y_preds[t], tf.argmax(label_t, 1)), tf.float32)
                 rewards.append(tf.expand_dims(reward, 1))
                 cumulative_rewards.append(cumulative + tf.expand_dims(reward, 1))
-                xentropy_loss = tf.nn.softmax_cross_entropy_with_logits(logits, label_t)
 
                 tf.scalar_summary("accuracy(t=%d)" % t, tf.reduce_mean(reward))
                 accuracy *= reward
@@ -184,7 +183,9 @@ def run(args):
                 else:
                     loss_included.append(reward_value)
 
-                loss += tf.reduce_mean(xentropy_loss * included)
+                xentropy_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits, label_t) * included)
+                tf.scalar_summary("loss:xentropy(t=%d)" % t, xentropy_loss)
+                xentropy_losses.append(xentropy_loss)
 
     reinforce_loss = 0.
     baseline_loss = 0.
@@ -215,10 +216,11 @@ def run(args):
         baseline_loss += tf.reduce_mean(tf.squared_difference(tf.reduce_mean(R), b) * included)
         std_loss += tf.reduce_mean(tf.squared_difference(std_value, std) * included)
 
+    xentropy_loss = tf.reduce_sum(xentropy_losses)
     reinforce_loss = tf.reduce_sum(tf.reduce_mean(reinforce_loss, reduction_indices=0))
-    total_loss = loss + args.alpha * reinforce_loss + baseline_loss + std_loss
+    total_loss = xentropy_loss + args.alpha * reinforce_loss + baseline_loss + std_loss
     tf.scalar_summary("loss:total", total_loss)
-    tf.scalar_summary("loss:xentropy", loss)
+    tf.scalar_summary("loss:xentropy", xentropy_loss)
     tf.scalar_summary("loss:reinforcement", reinforce_loss)
     tf.scalar_summary("loss:baseline", baseline_loss)
     tf.scalar_summary("loss:std", std_loss)
@@ -241,6 +243,9 @@ def run(args):
         assert os.path.exists(args.checkpoint)
         saver.restore(sess, args.checkpoint)
 
+    numpy_states = sess.run([initial_state[0].h, initial_state[0].c,
+                             initial_state[1].h, initial_state[1].c])
+
     if not args.test:
         epoch_loss = []
         epoch_reinforce_loss = []
@@ -256,7 +261,11 @@ def run(args):
 
             acc, loss, r_loss, sigma_loss, summary, _ = sess.run(
                 [accuracy, total_loss, reinforce_loss, std_loss, merged, train_step],
-                feed_dict={image: batch_x, label: batch_y, K.learning_phase(): 1})
+                feed_dict={image: batch_x, label: batch_y,
+                           initial_state[0].h: numpy_states[0],
+                           initial_state[0].c: numpy_states[1],
+                           initial_state[1].h: numpy_states[2],
+                           initial_state[1].c: numpy_states[3]})
 
             epoch_loss.append(loss)
             epoch_reinforce_loss.append(r_loss)
@@ -286,7 +295,10 @@ def run(args):
                     res = sess.run([accuracy, total_loss, reinforce_loss, std_loss] + locations,
                                    feed_dict={image: batch_x,
                                               label: batch_y,
-                                              K.learning_phase(): 0})
+                                              initial_state[0].h: numpy_states[0],
+                                              initial_state[0].c: numpy_states[1],
+                                              initial_state[1].h: numpy_states[2],
+                                              initial_state[1].c: numpy_states[3]})
                     acc, loss, r_loss, sigma_loss = res[:4]
                     locs = res[4:]
                     val_loss.append(loss)
@@ -332,6 +344,8 @@ if __name__ == "__main__":
     parser.add_argument("--baseline", dest="baseline", action="store_true", default=False)
     parser.add_argument("--glimpse_size", dest="glimpse_size", default="8x8")
     parser.add_argument("--ratio", dest="ratio", type=float, default=1.)
+    parser.add_argument("--num_patches", dest="num_patches", type=int, default=2)
+    parser.add_argument("--use_peepholes", dest="use_peepholes", action="store_true", default=False)
     args = parser.parse_args()
 
     args.image_size = [int(v) for v in args.image_size.split("x")]
